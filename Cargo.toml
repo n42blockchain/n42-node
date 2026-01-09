@@ -1,0 +1,86 @@
+[package]
+name = "n42-node"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "N42 POA blockchain node based on Reth"
+repository = "https://github.com/user/n42-node"
+
+[[bin]]
+name = "poa_demo"
+path = "src/bin/poa_demo.rs"
+
+[[bin]]
+name = "poa_node"
+path = "src/bin/poa_node.rs"
+
+[[bin]]
+name = "poa_eth66"
+path = "src/bin/poa_eth66.rs"
+
+[[bin]]
+name = "poa_sync_node"
+path = "src/bin/poa_sync_node.rs"
+
+[dependencies]
+# Reth core (from git, tag v1.9.3)
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-ethereum-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-network = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-node-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-stages-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-tracing = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+
+# Reth Ethereum (for network types)
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3", features = ["network"] }
+
+# P2P networking
+reth-discv4 = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-network-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+
+# Alloy
+alloy-consensus = "1.0.41"
+alloy-eips = "1.0.41"
+alloy-primitives = "1.4.1"
+alloy-rlp = { version = "0.3.10", features = ["derive"] }
+alloy-rpc-types-engine = "1.0.41"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+# Error handling
+eyre = "0.6"
+thiserror = "2.0"
+
+# Async runtime
+futures = "0.3"
+tokio = { version = "1.44", features = ["full", "sync", "time"] }
+tokio-stream = "0.1"
+
+# Crypto
+secp256k1 = { version = "0.30", features = ["rand", "global-context", "recovery"] }
+
+# Concurrency
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 1
