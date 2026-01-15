@@ -53,17 +53,20 @@ $Node0Process = Start-Process -FilePath $Binary -ArgumentList "--port", $BasePor
 $NodeProcesses += $Node0Process
 Write-Host "Node 0 PID: $($Node0Process.Id)"
 
-# Wait for node 0 to start
-Start-Sleep -Seconds 3
-
-# Get enode from node 0
+# Wait for node 0 to start and get enode
 $Enode = $null
-$LogContent = Get-Content $Node0Log -ErrorAction SilentlyContinue
-foreach ($line in $LogContent) {
-    if ($line -match 'enode://[^\s]+') {
-        $Enode = $Matches[0]
-        break
+$MaxWait = 10
+for ($wait = 0; $wait -lt $MaxWait; $wait++) {
+    Start-Sleep -Seconds 1
+    $LogContent = Get-Content $Node0Log -ErrorAction SilentlyContinue
+    foreach ($line in $LogContent) {
+        if ($line -match 'enode://[^\s]+') {
+            $Enode = $Matches[0]
+            break
+        }
     }
+    if ($Enode) { break }
+    Write-Host "Waiting for enode... ($wait/$MaxWait)"
 }
 
 if (-not $Enode) {

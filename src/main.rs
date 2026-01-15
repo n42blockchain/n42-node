@@ -147,7 +147,7 @@ fn demonstrate_beacon_blocks() {
         ..Default::default()
     };
 
-    let block = BeaconBlock::new(
+    let block = BeaconBlock::new_without_difficulty(
         100,                        // slot
         42,                         // proposer_index
         B256::repeat_byte(0x01),    // parent_root
@@ -181,7 +181,7 @@ fn demonstrate_beacon_storage() {
 
     // Insert some blocks
     for slot in [100, 101, 102, 105, 110] {
-        let block = BeaconBlock::new(
+        let block = BeaconBlock::new_without_difficulty(
             slot,
             42,
             B256::repeat_byte(slot as u8),
@@ -255,7 +255,7 @@ fn demonstrate_validation() {
     println!("   - Validates signature length");
 
     let beacon = SignedBeaconBlock::new(
-        BeaconBlock::new(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
+        BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
         Bytes::from_static(&[0x00; 96]),
     );
     match beacon_validator.validate(&beacon) {

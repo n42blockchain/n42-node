@@ -301,7 +301,7 @@ mod tests {
     }
 
     fn create_test_block(slot: u64, proposer_index: u64, parent_root: B256) -> BeaconBlock {
-        BeaconBlock::new(
+        BeaconBlock::new_without_difficulty(
             slot,
             proposer_index,
             parent_root,

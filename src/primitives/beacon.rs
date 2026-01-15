@@ -124,18 +124,40 @@ pub struct BeaconBlock {
     pub state_root: B256,
     /// Block body.
     pub body: BeaconBlockBody,
+    /// POA difficulty (2 = in_turn, 1 = out_of_turn).
+    /// This field is used for Clique POA consensus.
+    pub difficulty: u64,
 }
 
 impl BeaconBlock {
-    /// Create a new beacon block.
+    /// Create a new beacon block with difficulty (for POA).
     pub const fn new(
         slot: u64,
         proposer_index: u64,
         parent_root: B256,
         state_root: B256,
         body: BeaconBlockBody,
+        difficulty: u64,
     ) -> Self {
-        Self { slot, proposer_index, parent_root, state_root, body }
+        Self { slot, proposer_index, parent_root, state_root, body, difficulty }
+    }
+
+    /// Create a new beacon block without difficulty (defaults to 0).
+    /// Use this for non-POA contexts or when difficulty is not needed.
+    pub const fn new_without_difficulty(
+        slot: u64,
+        proposer_index: u64,
+        parent_root: B256,
+        state_root: B256,
+        body: BeaconBlockBody,
+    ) -> Self {
+        Self { slot, proposer_index, parent_root, state_root, body, difficulty: 0 }
+    }
+
+    /// Set difficulty and return self (builder pattern).
+    pub const fn with_difficulty(mut self, difficulty: u64) -> Self {
+        self.difficulty = difficulty;
+        self
     }
 
     /// Get the header for this block.
@@ -232,12 +254,13 @@ mod tests {
     #[test]
     fn test_beacon_block_header_from_block() {
         let body = BeaconBlockBody::default();
-        let block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body.clone());
+        let block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body.clone(), 2);
 
         let header = block.header();
         assert_eq!(header.slot, 100);
         assert_eq!(header.proposer_index, 42);
         assert_eq!(header.body_root, body.body_root());
+        assert_eq!(block.difficulty, 2);
     }
 
     #[test]
@@ -248,6 +271,7 @@ mod tests {
             B256::ZERO,
             B256::repeat_byte(0x11),
             BeaconBlockBody::default(),
+            2, // difficulty: in_turn
         );
 
         let signed = SignedBeaconBlock::new(block, Bytes::from_static(&[0x00; 96]));
@@ -273,6 +297,7 @@ mod tests {
                 graffiti: B256::repeat_byte(0x05),
                 execution_payload_root: B256::repeat_byte(0x06),
             },
+            2, // difficulty: in_turn
         );
 
         // Encode
@@ -282,5 +307,6 @@ mod tests {
         // Decode
         let decoded = BeaconBlock::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(block, decoded);
+        assert_eq!(decoded.difficulty, 2);
     }
 }

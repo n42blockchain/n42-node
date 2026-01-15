@@ -192,7 +192,7 @@ mod tests {
     use alloy_primitives::Bytes;
 
     fn create_test_block(slot: u64) -> SignedBeaconBlock {
-        let block = BeaconBlock::new(
+        let block = BeaconBlock::new_without_difficulty(
             slot,
             42,
             B256::repeat_byte(slot as u8),

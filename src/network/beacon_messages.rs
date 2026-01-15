@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_beacon_blocks_response_rlp_roundtrip() {
         let block1 = SignedBeaconBlock::new(
-            BeaconBlock::new(
+            BeaconBlock::new_without_difficulty(
                 100,
                 1,
                 B256::ZERO,
@@ -225,7 +225,7 @@ mod tests {
         );
 
         let block2 = SignedBeaconBlock::new(
-            BeaconBlock::new(
+            BeaconBlock::new_without_difficulty(
                 101,
                 2,
                 block1.block_root(),

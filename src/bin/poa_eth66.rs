@@ -26,6 +26,8 @@ use n42_node::{
     Clique, CliqueConfig, ChainHeaderReader, ChainConfig, HeaderData,
     MemorySnapshotDatabase, EXTRA_VANITY,
     CLIQUE_DIFF_IN_TURN, CLIQUE_DIFF_NO_TURN, NONCE_DROP_VOTE,
+    // Miner module types
+    MinerConfig, MinerEvent, PoaAttributesProvider, Worker as MinerWorker,
 };
 use reth_chainspec::MAINNET;
 use reth_discv4::Discv4ConfigBuilder;
@@ -194,6 +196,7 @@ impl ChainHeaderReader for CliqueChainReader {
 }
 
 /// POA node state with Clique consensus
+#[allow(dead_code)]
 struct PoaNode {
     /// Clique consensus engine
     clique: Clique<MemorySnapshotDatabase>,
@@ -298,6 +301,7 @@ impl PoaNode {
             B256::ZERO,  // parent_root (no parent)
             state_root,
             body,
+            CLIQUE_DIFF_IN_TURN,  // genesis is always in-turn
         );
 
         // Genesis signature is deterministic (all zeros for simplicity)
@@ -314,12 +318,16 @@ impl PoaNode {
     }
 
     /// Check if this validator is in-turn for the given slot
+    /// NOTE: Now handled by miner module, kept for reference
+    #[allow(dead_code)]
     fn is_in_turn(&self, slot: u64) -> bool {
         let expected_index = (slot as usize) % self.validators.len();
         expected_index == self.validator_index
     }
 
     /// Sign data with the node's private key
+    /// NOTE: Now handled by miner module, kept for reference
+    #[allow(dead_code)]
     fn sign(&self, data: &[u8]) -> Vec<u8> {
         let hash = keccak256(data);
         let message = Message::from_digest_slice(hash.as_slice()).unwrap();
@@ -335,6 +343,8 @@ impl PoaNode {
     }
 
     /// Produce a block for the given slot
+    /// NOTE: Now handled by miner module, kept for reference
+    #[allow(dead_code)]
     fn produce_block(&self, slot: u64) -> Option<SignedBeaconBlock> {
         // Check if we already produced for this slot
         {
@@ -371,13 +381,14 @@ impl PoaNode {
             ..Default::default()
         };
 
-        // Create unsigned block
+        // Create unsigned block with POA difficulty
         let block = BeaconBlock::new(
             slot,
             self.validator_index as u64,
             parent_root,
             B256::random(), // state_root (simplified)
             body,
+            difficulty,
         );
 
         // Create seal hash (hash of block content for signing)
@@ -760,11 +771,32 @@ async fn main() -> eyre::Result<()> {
 
     let (block_tx, mut block_rx) = mpsc::channel::<SignedBeaconBlock>(32);
 
-    // Spawn block producer with proper round-robin
+    // Create miner configuration
+    let miner_config = MinerConfig::new(validators[args.validator_index], signing_key.clone())
+        .with_recommit_interval(Duration::from_secs(2));
+
+    // Create POA attributes provider
+    // genesis_time = 0 because current_slot() uses `now / block_time`
+    // so timestamp(slot) = slot * block_time matches current time
+    let attrs_provider = Arc::new(PoaAttributesProvider::new(
+        validators[args.validator_index],
+        args.block_time,
+        0, // genesis_time = 0 for compatibility with current_slot()
+    ));
+
+    // Spawn miner worker
+    let (miner_handle, mut miner_events) = MinerWorker::spawn(
+        miner_config,
+        attrs_provider,
+        args.validator_index as u64,
+    );
+
+    info!("Miner worker started with wiggle delay support");
+
+    // Spawn block producer that uses the miner
     let poa_clone = poa_node.clone();
-    let block_tx_clone = block_tx.clone();
-    let block_time = args.block_time;
     let validator_count = validators.len();
+    let miner_handle_clone = miner_handle.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -780,27 +812,65 @@ async fn main() -> eyre::Result<()> {
                 continue;
             }
 
-            // Check if it's our turn
+            // Check if it's our turn (for deciding in_turn vs out_of_turn)
             let expected_producer = (current_slot as usize) % validator_count;
-            let is_our_turn = expected_producer == poa_clone.validator_index;
+            let is_in_turn = expected_producer == poa_clone.validator_index;
 
-            // Only produce when it's our turn (strict round-robin)
-            if is_our_turn {
-                if let Some(block) = poa_clone.produce_block(current_slot) {
-                    let hash = block.block_root();
+            // Get parent block for mining
+            if let Ok(Some(parent)) = poa_clone.store.latest_block() {
+                // Only start mining if slot is newer than parent
+                if current_slot > parent.slot() {
+                    // Start mining with the miner worker
+                    let _ = miner_handle_clone
+                        .start_mining(parent, current_slot, is_in_turn, validator_count)
+                        .await;
+                }
+            }
+
+            last_checked_slot = current_slot;
+        }
+    });
+
+    // Spawn miner event handler - receives sealed blocks from miner
+    let poa_clone2 = poa_node.clone();
+    let block_tx_clone2 = block_tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = miner_events.recv().await {
+            match event {
+                MinerEvent::BlockSealed(result) => {
+                    let block = result.block;
+                    let hash = result.hash;
+
+                    info!(
+                        slot = block.slot(),
+                        hash = %hash,
+                        latency_ms = result.seal_latency.as_millis(),
+                        "Miner sealed block"
+                    );
 
                     // Store in blocks_by_hash
                     {
-                        let mut blocks = poa_clone.blocks_by_hash.write().unwrap();
+                        let mut blocks = poa_clone2.blocks_by_hash.write().unwrap();
                         blocks.insert(hash, block.clone());
                     }
 
-                    let _ = poa_clone.store.insert_block(block.clone());
-                    poa_clone.chain_reader.insert_header(&block);
-                    let _ = block_tx_clone.send(block).await;
+                    // Store in beacon store
+                    let _ = poa_clone2.store.insert_block(block.clone());
+                    poa_clone2.chain_reader.insert_header(&block);
+
+                    // Send to broadcaster
+                    let _ = block_tx_clone2.send(block).await;
+                }
+                MinerEvent::MiningStarted { slot, in_turn } => {
+                    debug!(slot = slot, in_turn = in_turn, "Mining started");
+                }
+                MinerEvent::MiningCancelled { reason } => {
+                    debug!(reason = %reason, "Mining cancelled");
+                }
+                MinerEvent::Error(err) => {
+                    warn!(error = %err, "Miner error");
                 }
             }
-            last_checked_slot = current_slot;
         }
     });
 

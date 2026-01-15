@@ -398,7 +398,7 @@ mod tests {
             execution_payload_root: execution_hash,
             ..Default::default()
         };
-        let block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
+        let block = BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
         SignedBeaconBlock::new(block, Bytes::from_static(&[0x00; 96]))
     }
 
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn test_valid_cross_references() {
         // Create beacon block first
-        let beacon_block = BeaconBlock::new(
+        let beacon_block = BeaconBlock::new_without_difficulty(
             100,
             42,
             B256::ZERO,
@@ -493,7 +493,7 @@ mod tests {
 
         // Update beacon body with correct execution hash
         let body = BeaconBlockBody { execution_payload_root: execution_hash, ..Default::default() };
-        let beacon_block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
+        let beacon_block = BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from_static(&[0x00; 96]));
 
         // Need to recreate execution with updated beacon root
@@ -508,7 +508,7 @@ mod tests {
         // Update beacon with correct execution hash
         let body =
             BeaconBlockBody { execution_payload_root: execution.hash(), ..Default::default() };
-        let beacon_block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
+        let beacon_block = BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from_static(&[0x00; 96]));
 
         // Final execution with matching beacon root
@@ -523,7 +523,7 @@ mod tests {
         // Final beacon with matching execution hash
         let body =
             BeaconBlockBody { execution_payload_root: execution.hash(), ..Default::default() };
-        let beacon_block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
+        let beacon_block = BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::repeat_byte(0x11), body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from_static(&[0x00; 96]));
 
         let unified = UnifiedBlock::new(beacon, execution);
@@ -634,7 +634,7 @@ mod tests {
 
         // Create beacon block
         let beacon_body = BeaconBlockBody::default();
-        let beacon_block = BeaconBlock::new(100, 42, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
+        let beacon_block = BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from_static(&[0x00; 96]));
 
         // Create execution block
@@ -672,7 +672,7 @@ mod tests {
 
         // Create beacon block
         let beacon_body = BeaconBlockBody::default();
-        let beacon_block = BeaconBlock::new(589164825, 0, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
+        let beacon_block = BeaconBlock::new_without_difficulty(589164825, 0, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from(vec![0x00u8; 96]));
 
         // Create execution block
@@ -757,7 +757,7 @@ mod tests {
 
         // Create beacon block
         let beacon_body = BeaconBlockBody::default();
-        let beacon_block = BeaconBlock::new(589164825, 0, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
+        let beacon_block = BeaconBlock::new_without_difficulty(589164825, 0, B256::ZERO, B256::repeat_byte(0x11), beacon_body);
         let beacon = SignedBeaconBlock::new(beacon_block, Bytes::from(vec![0x00u8; 96]));
 
         // Create execution block (same as network code in poa_eth66.rs)

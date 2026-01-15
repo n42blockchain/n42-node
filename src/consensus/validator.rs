@@ -219,7 +219,7 @@ mod tests {
             ..Default::default()
         };
 
-        let block = BeaconBlock::new(
+        let block = BeaconBlock::new_without_difficulty(
             slot,
             proposer_index,
             parent_root,

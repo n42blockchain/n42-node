@@ -123,7 +123,7 @@ impl PoaNode {
             ..Default::default()
         };
 
-        let block = BeaconBlock::new(slot, proposer_index, parent_root, B256::ZERO, body);
+        let block = BeaconBlock::new(slot, proposer_index, parent_root, B256::ZERO, body, difficulty);
 
         let mut sig = vec![0u8; 96];
         sig[..20].copy_from_slice(self.coinbase.as_slice());

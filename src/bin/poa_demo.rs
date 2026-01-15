@@ -80,7 +80,7 @@ impl ValidatorNode {
             ..Default::default()
         };
 
-        let block = BeaconBlock::new(slot, proposer_index, parent_root, B256::ZERO, body);
+        let block = BeaconBlock::new(slot, proposer_index, parent_root, B256::ZERO, body, difficulty);
 
         // Create signed block (placeholder signature with validator address)
         let mut sig = vec![0u8; 96];
@@ -295,6 +295,7 @@ fn main() {
                 graffiti,
                 ..Default::default()
             },
+            DIFFICULTY_IN_TURN,
         ),
         vec![0u8; 96].into(),
     );

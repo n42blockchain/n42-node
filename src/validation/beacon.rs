@@ -142,7 +142,7 @@ mod tests {
 
     fn create_test_beacon_block(slot: u64, parent_root: B256) -> SignedBeaconBlock {
         SignedBeaconBlock::new(
-            BeaconBlock::new(
+            BeaconBlock::new_without_difficulty(
                 slot,
                 42,
                 parent_root,
@@ -165,7 +165,7 @@ mod tests {
     fn test_validate_invalid_signature_length() {
         let validator = BeaconBlockValidator::new();
         let block = SignedBeaconBlock::new(
-            BeaconBlock::new(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
+            BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
             Bytes::from_static(&[0x00; 10]), // Too short
         );
 
@@ -177,7 +177,7 @@ mod tests {
     fn test_validate_skip_signature() {
         let validator = BeaconBlockValidator::without_signature_validation();
         let block = SignedBeaconBlock::new(
-            BeaconBlock::new(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
+            BeaconBlock::new_without_difficulty(100, 42, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
             Bytes::from_static(&[0x00; 10]), // Too short, but skipped
         );
 

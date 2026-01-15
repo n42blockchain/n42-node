@@ -240,7 +240,7 @@ impl PoaWorker {
             execution_payload_root: self.execution_payload_root,
         };
 
-        let block = BeaconBlock::new(slot, proposer_index, self.parent_root, B256::ZERO, body);
+        let block = BeaconBlock::new_without_difficulty(slot, proposer_index, self.parent_root, B256::ZERO, body);
 
         // Create signature placeholder (in production, this would be a real BLS signature)
         let signature = create_placeholder_signature(&coinbase);
@@ -583,7 +583,7 @@ mod tests {
 
         // Create a parent block
         let parent_block = SignedBeaconBlock::new(
-            BeaconBlock::new(5, 0, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
+            BeaconBlock::new_without_difficulty(5, 0, B256::ZERO, B256::ZERO, BeaconBlockBody::default()),
             Bytes::from_static(&[0; 96]),
         );
 

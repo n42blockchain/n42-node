@@ -65,6 +65,7 @@ use tokio_stream as _;
 pub mod consensus;
 pub mod engine;
 pub mod evm;
+pub mod miner;
 pub mod network;
 pub mod node;
 pub mod primitives;
@@ -130,4 +131,13 @@ pub use stages::{
     BeaconBlockClient, BeaconBlockDownloader, BeaconBlocksStage, BeaconDownloaderConfig,
     BeaconExecutionMapping, BeaconExecutionMappingProvider, BeaconSyncTarget,
     BeaconSyncTargetProvider, WatchSyncTargetProvider,
+};
+
+// Re-export miner types
+pub use miner::{
+    AttributesWithParentRoot, MinerCommand, MinerConfig, MinerError, MinerEvent,
+    MinerHandle, MinerResult, MiningEnvironment, PayloadAttributesProvider,
+    PoaAttributesProvider, SealResult, Worker,
+    calculate_seal_delay, recover_signer, seal_block, verify_block_signature,
+    DEFAULT_GAS_CEIL, DEFAULT_GAS_PRICE, DEFAULT_RECOMMIT_INTERVAL, WIGGLE_TIME_MS,
 };
