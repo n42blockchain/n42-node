@@ -117,6 +117,14 @@ pub use consensus::{
     Checkpoint, DomainType, StateTransitionConfig, StateTransitionError, StateTransitionResult,
 };
 
+// Re-export Clique POA consensus types
+pub use consensus::clique::{
+    Clique, CliqueConfig, CliqueError, ChainHeaderReader, ChainConfig,
+    HeaderData, Snapshot, SnapshotDatabase, MemorySnapshotDatabase,
+    EXTRA_VANITY, EXTRA_SEAL, DIFF_IN_TURN as CLIQUE_DIFF_IN_TURN,
+    DIFF_NO_TURN as CLIQUE_DIFF_NO_TURN, NONCE_AUTH_VOTE, NONCE_DROP_VOTE,
+};
+
 // Re-export stages
 pub use stages::{
     BeaconBlockClient, BeaconBlockDownloader, BeaconBlocksStage, BeaconDownloaderConfig,

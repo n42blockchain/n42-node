@@ -35,6 +35,7 @@
 //! - [`state_transition`]: State transition and block validation
 
 mod config;
+pub mod clique;
 pub mod state;
 pub mod state_transition;
 mod validator;

@@ -67,6 +67,8 @@ if [ -z "$ENODE" ]; then
     kill ${NODE_PIDS[0]} 2>/dev/null
     exit 1
 fi
+# Replace 0.0.0.0 with 127.0.0.1 (0.0.0.0 is bind address, not routable)
+ENODE=$(echo "$ENODE" | sed 's/@0\.0\.0\.0:/@127.0.0.1:/g')
 echo "Node 0 enode: $ENODE"
 
 # Start remaining nodes
