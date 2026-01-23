@@ -35,7 +35,10 @@
 //! - [`state_transition`]: State transition and block validation
 
 mod config;
+pub mod block_tree;
 pub mod clique;
+pub mod fork_choice;
+pub mod reorg;
 pub mod state;
 pub mod state_transition;
 mod validator;
@@ -56,6 +59,14 @@ pub use validator::{
 pub use worker::{
     PoaWorker, PoaWorkerBuilder, PoaWorkerCommand, PoaWorkerConfig, PoaWorkerEvent,
     PoaWorkerHandle,
+};
+
+// Reorg support
+pub use block_tree::{BeaconBlockTree, BlockTreeError, DEFAULT_RETENTION_DEPTH};
+pub use fork_choice::{CliqueForkChoice, ForkChoiceDecision, ForkChoiceError, MAX_REORG_DEPTH};
+pub use reorg::{
+    ChannelEngineNotifier, EngineApiNotifier, ForkchoiceState, NoopEngineNotifier,
+    ReorgConfig, ReorgError, ReorgEvent, ReorgExecutor, ReorgStats,
 };
 
 /// In-turn difficulty value (when it's the validator's assigned slot)
