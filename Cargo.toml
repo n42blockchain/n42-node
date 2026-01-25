@@ -22,6 +22,10 @@ path = "src/bin/poa_eth66.rs"
 name = "poa_sync_node"
 path = "src/bin/poa_sync_node.rs"
 
+[[bin]]
+name = "test_fork_scenario"
+path = "src/bin/test_fork_scenario.rs"
+
 [dependencies]
 # Reth core (from git, tag v1.9.3)
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
