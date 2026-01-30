@@ -468,10 +468,10 @@ mod tests {
     use super::*;
     use crate::miner::PoaAttributesProvider;
     use alloy_primitives::Address;
-    use secp256k1::SecretKey;
 
     fn create_test_config() -> MinerConfig {
-        let key = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let ikm = [1u8; 32];
+        let key = blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap();
         let coinbase = Address::repeat_byte(0x01);
         MinerConfig::new(coinbase, key).with_recommit_interval(Duration::from_millis(100))
     }

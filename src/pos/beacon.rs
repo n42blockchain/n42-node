@@ -1298,6 +1298,173 @@ impl BeaconState {
         let inactivity_scores_store_num_pruned = self.inactivity_scores_store.prune();
         debug!(?validators_store_num_pruned, ?balances_store_num_pruned, ?inactivity_scores_store_num_pruned, "prune BeaconState");
     }
+
+    /// Compute proposer index for a given slot using RANDAO-based selection.
+    ///
+    /// This implements the Ethereum 2.0 spec's `compute_proposer_index` function,
+    /// which selects proposers weighted by their effective balance.
+    pub fn compute_proposer_index_for_slot(&self, slot: u64) -> eyre::Result<u64> {
+        let epoch = slot / SLOTS_PER_EPOCH;
+        let active_indices = self.get_active_validator_indices(epoch);
+
+        if active_indices.is_empty() {
+            return Err(eyre::eyre!("No active validators"));
+        }
+
+        // Get the seed for proposer selection (DOMAIN_BEACON_PROPOSER = 0)
+        let seed = self.get_seed(epoch, 0)?;
+
+        // Mix in the slot to get unique proposer per slot
+        let mut slot_seed = [0u8; 40]; // 32 bytes seed + 8 bytes slot
+        slot_seed[..32].copy_from_slice(seed.as_slice());
+        slot_seed[32..].copy_from_slice(&slot.to_le_bytes());
+        let slot_hash = hash(&slot_seed);
+
+        let spec = beacon_chain_spec();
+        self.compute_proposer_index(&active_indices, &slot_hash, &spec)
+    }
+
+    /// Compute proposer index using the Ethereum 2.0 spec algorithm.
+    ///
+    /// This selects a proposer weighted by effective balance using random sampling.
+    fn compute_proposer_index(
+        &self,
+        indices: &[usize],
+        seed: &[u8],
+        spec: &ChainSpec,
+    ) -> eyre::Result<u64> {
+        if indices.is_empty() {
+            return Err(eyre::eyre!("No validator indices"));
+        }
+
+        const MAX_RANDOM_BYTE: u64 = u8::MAX as u64;
+        let total = indices.len() as u64;
+
+        // Iterate through candidates using hash-based random selection
+        let mut i: u64 = 0;
+        loop {
+            // Note: We use hash-based selection instead of pre-computed shuffling
+            // for efficiency when only selecting one proposer per slot
+
+            // Get candidate from shuffled position using hash
+            let mut index_seed = [0u8; 40]; // 32 bytes seed + 8 bytes index
+            index_seed[..32].copy_from_slice(seed);
+            index_seed[32..].copy_from_slice(&(i / 32).to_le_bytes());
+            let index_hash = hash(&index_seed);
+
+            // Use hash to select from indices
+            let hash_val = u64::from_le_bytes(index_hash[..8].try_into().unwrap());
+            let candidate_position = (hash_val % total) as usize;
+            let candidate_index = indices.get(candidate_position)
+                .ok_or_else(|| eyre::eyre!("Invalid candidate position"))?;
+
+            // Get random byte for effective balance check
+            let random_byte = index_hash[(i % 32) as usize] as u64;
+
+            // Get validator's effective balance
+            let validator = self.validators_store.get(*candidate_index)
+                .ok_or_else(|| eyre::eyre!("Validator not found"))?;
+            let effective_balance = validator.effective_balance;
+
+            // Check if this validator is selected (weighted by effective balance)
+            if effective_balance * MAX_RANDOM_BYTE >= spec.max_effective_balance * random_byte {
+                return Ok(*candidate_index as u64);
+            }
+
+            i += 1;
+
+            // Safety limit to prevent infinite loops
+            if i > total * 1000 {
+                // Fallback: return first active validator
+                return Ok(indices[0] as u64);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Trait Implementations for POA/POS Abstraction
+// =============================================================================
+
+use crate::consensus::traits::{
+    ProposerSelector, StateProvider, ValidatorInfo, ValidatorProvider, ValidatorPubkey,
+};
+
+impl ValidatorProvider for BeaconState {
+    fn validator_count(&self) -> usize {
+        self.validators_store.len()
+    }
+
+    fn get_validator_info(&self, index: u64) -> Option<ValidatorInfo> {
+        self.validators_store.get(index as usize).map(|v| {
+            let current_epoch = self.current_epoch();
+            ValidatorInfo {
+                index,
+                is_active: v.is_active_at(current_epoch),
+                address: v.get_execution_withdrawal_address(),
+            }
+        })
+    }
+
+    fn get_validator_pubkey(&self, index: u64) -> Option<ValidatorPubkey> {
+        self.validators_store.get(index as usize).map(|v| {
+            let mut bytes = [0u8; 48];
+            bytes.copy_from_slice(v.pubkey.as_slice());
+            ValidatorPubkey::new(bytes)
+        })
+    }
+}
+
+impl ProposerSelector for BeaconState {
+    fn get_proposer_index_for_slot(&self, slot: u64) -> u64 {
+        // Use RANDAO-based proposer selection for POS
+        self.compute_proposer_index_for_slot(slot)
+            .unwrap_or_else(|_| {
+                // Fallback to simple round-robin if RANDAO fails
+                let validator_count = self.validators_store.len();
+                if validator_count == 0 {
+                    0
+                } else {
+                    slot % validator_count as u64
+                }
+            })
+    }
+
+    fn get_proposer_index(&self) -> u64 {
+        self.get_proposer_index_for_slot(self.slot)
+    }
+}
+
+impl StateProvider for BeaconState {
+    fn current_slot(&self) -> u64 {
+        self.slot
+    }
+
+    fn advance_slot(&mut self) {
+        self.slot += 1;
+    }
+
+    fn get_domain(&self, domain_type: u32) -> alloy_primitives::B256 {
+        self.get_seed(self.current_epoch(), domain_type)
+            .unwrap_or_default()
+    }
+
+    fn compute_state_root(&self) -> alloy_primitives::B256 {
+        // Simplified state root computation for POS
+        // Hash key state components
+        use alloy_primitives::keccak256;
+        let mut data = Vec::new();
+        data.extend_from_slice(&self.slot.to_le_bytes());
+        data.extend_from_slice(self.validators.as_slice());
+        data.extend_from_slice(self.balances.as_slice());
+        data.extend_from_slice(&(self.validators_store.len() as u64).to_le_bytes());
+        keccak256(&data)
+    }
+
+    fn genesis_validators_root(&self) -> alloy_primitives::B256 {
+        // Use the validators tree root as genesis validators root
+        alloy_primitives::B256::from_slice(self.validators.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Encode, Decode)]

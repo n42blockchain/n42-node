@@ -1,8 +1,8 @@
-//! Simplified BeaconState for POA consensus.
+//! Simplified BeaconState for POA consensus with BLS signatures.
 //!
 //! This is a minimal beacon state implementation that only tracks
 //! what's needed for POA block validation:
-//! - Validator set (with public keys)
+//! - Validator set (with BLS public keys)
 //! - Latest block information
 //! - Slot progression
 //!
@@ -11,24 +11,29 @@
 //! Unlike Ethereum's full BeaconState which tracks attestations,
 //! slashings, balances, etc., this simplified version only needs to:
 //! 1. Know who can produce blocks (validator set)
-//! 2. Verify signatures (validator public keys)
+//! 2. Verify signatures (validator BLS public keys)
 //! 3. Track chain progression (slot, latest block)
 
 use alloy_primitives::{keccak256, Address, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
-use secp256k1::PublicKey;
 use std::collections::HashMap;
+
+use super::traits::{
+    ProposerSelector, StateProvider, ValidatorInfo, ValidatorProvider, ValidatorPubkey,
+};
+
+/// BLS public key type (48 bytes).
+pub type BLSPubkey = [u8; 48];
 
 /// A validator in the beacon state.
 ///
-/// For POA, we use secp256k1 keys (same as Ethereum accounts)
-/// instead of BLS keys used in Ethereum PoS.
+/// Uses BLS public keys for signature verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BeaconValidator {
-    /// Validator's Ethereum address (derived from public key).
+    /// Validator's Ethereum address (derived from BLS public key hash).
     pub address: Address,
-    /// Validator's secp256k1 public key.
-    pub pubkey: PublicKey,
+    /// Validator's BLS public key (48 bytes).
+    pub pubkey: BLSPubkey,
     /// Index in the validator set.
     pub index: u64,
     /// Whether this validator is active.
@@ -36,30 +41,35 @@ pub struct BeaconValidator {
 }
 
 impl BeaconValidator {
-    /// Create a new validator from a public key.
-    pub fn new(pubkey: PublicKey, index: u64) -> Self {
-        let address = public_key_to_address(&pubkey);
+    /// Create a new validator from a BLS public key.
+    pub fn new(pubkey: BLSPubkey, index: u64) -> Self {
+        let address = bls_pubkey_to_address(&pubkey);
         Self { address, pubkey, index, active: true }
     }
 
-    /// Create from address and public key.
-    pub fn from_address_and_pubkey(address: Address, pubkey: PublicKey, index: u64) -> Self {
+    /// Create from address and BLS public key.
+    pub fn from_address_and_pubkey(address: Address, pubkey: BLSPubkey, index: u64) -> Self {
         Self { address, pubkey, index, active: true }
     }
 }
 
-/// Convert a secp256k1 public key to an Ethereum address.
-pub fn public_key_to_address(pubkey: &PublicKey) -> Address {
-    let pubkey_bytes = pubkey.serialize_uncompressed();
-    // Skip the first byte (0x04 prefix for uncompressed)
-    let hash = keccak256(&pubkey_bytes[1..]);
+/// Convert a BLS public key to an Ethereum address.
+///
+/// Takes the keccak256 hash of the public key and uses the last 20 bytes.
+pub fn public_key_to_address(pubkey: &BLSPubkey) -> Address {
+    let hash = keccak256(pubkey);
     Address::from_slice(&hash[12..])
+}
+
+/// Alias for public_key_to_address for BLS keys.
+pub fn bls_pubkey_to_address(pubkey: &BLSPubkey) -> Address {
+    public_key_to_address(pubkey)
 }
 
 /// Simplified BeaconState for POA consensus.
 ///
 /// This tracks the minimal state needed to validate beacon blocks:
-/// - Validator set with public keys
+/// - Validator set with BLS public keys
 /// - Latest finalized/justified information
 /// - Current slot
 #[derive(Clone, Debug)]
@@ -250,6 +260,83 @@ impl BeaconState {
     }
 }
 
+// =============================================================================
+// Trait Implementations for BLS-based Consensus
+// =============================================================================
+
+impl ValidatorProvider for BeaconState {
+    fn validator_count(&self) -> usize {
+        self.validators.len()
+    }
+
+    fn get_validator_info(&self, index: u64) -> Option<ValidatorInfo> {
+        self.validators.get(index as usize).map(|v| ValidatorInfo {
+            index: v.index,
+            is_active: v.active,
+            address: Some(v.address),
+        })
+    }
+
+    fn get_validator_pubkey(&self, index: u64) -> Option<ValidatorPubkey> {
+        self.validators.get(index as usize).map(|v| {
+            ValidatorPubkey::new(v.pubkey)
+        })
+    }
+
+    fn get_validator_by_address(&self, address: &Address) -> Option<ValidatorInfo> {
+        self.validator_indices
+            .get(address)
+            .and_then(|&idx| self.get_validator_info(idx))
+    }
+}
+
+impl ProposerSelector for BeaconState {
+    fn get_proposer_index_for_slot(&self, slot: u64) -> u64 {
+        if self.validators.is_empty() {
+            return 0;
+        }
+        slot % self.validators.len() as u64
+    }
+
+    fn get_proposer_index(&self) -> u64 {
+        self.get_proposer_index_for_slot(self.slot)
+    }
+}
+
+impl StateProvider for BeaconState {
+    fn current_slot(&self) -> u64 {
+        self.slot
+    }
+
+    fn advance_slot(&mut self) {
+        self.slot += 1;
+    }
+
+    fn get_domain(&self, domain_type: u32) -> B256 {
+        let dt = match domain_type {
+            0 => DomainType::BeaconProposer,
+            1 => DomainType::BeaconAttester,
+            2 => DomainType::Randao,
+            _ => DomainType::BeaconProposer,
+        };
+        compute_domain(dt, self.genesis_validators_root)
+    }
+
+    fn compute_state_root(&self) -> B256 {
+        // Simplified: hash of key state components
+        let mut data = Vec::new();
+        data.extend_from_slice(&self.slot.to_le_bytes());
+        data.extend_from_slice(self.latest_block_header.block_root().as_slice());
+        data.extend_from_slice(self.genesis_validators_root.as_slice());
+        data.extend_from_slice(&(self.validators.len() as u64).to_le_bytes());
+        keccak256(&data)
+    }
+
+    fn genesis_validators_root(&self) -> B256 {
+        self.genesis_validators_root
+    }
+}
+
 /// Domain types for signature separation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -289,7 +376,7 @@ pub fn compute_domain(domain_type: DomainType, genesis_validators_root: B256) ->
 fn compute_validators_root(validators: &[BeaconValidator]) -> B256 {
     let mut data = Vec::new();
     for v in validators {
-        data.extend_from_slice(v.address.as_slice());
+        data.extend_from_slice(&v.pubkey);
     }
     keccak256(&data)
 }
@@ -307,14 +394,14 @@ pub fn compute_signing_root(message_root: B256, domain: B256) -> B256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::{Secp256k1, SecretKey};
 
     fn create_test_validators(count: usize) -> Vec<BeaconValidator> {
-        let secp = Secp256k1::new();
         (0..count)
             .map(|i| {
-                let secret = SecretKey::from_slice(&[i as u8 + 1; 32]).unwrap();
-                let pubkey = PublicKey::from_secret_key(&secp, &secret);
+                // Create a deterministic BLS pubkey for testing
+                let mut pubkey = [0u8; 48];
+                pubkey[0] = i as u8 + 1;
+                pubkey[47] = i as u8 + 1;
                 BeaconValidator::new(pubkey, i as u64)
             })
             .collect()
@@ -388,10 +475,7 @@ mod tests {
 
     #[test]
     fn test_public_key_to_address() {
-        let secp = Secp256k1::new();
-        let secret = SecretKey::from_slice(&[1u8; 32]).unwrap();
-        let pubkey = PublicKey::from_secret_key(&secp, &secret);
-
+        let pubkey = [1u8; 48];
         let address = public_key_to_address(&pubkey);
         assert_ne!(address, Address::ZERO);
     }

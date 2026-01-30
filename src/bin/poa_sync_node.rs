@@ -13,7 +13,7 @@
 //!     --port 30400 --bootnode enode://...@127.0.0.1:30303
 //! ```
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use n42_node::{
     BeaconStoreReader, BeaconStoreWriter, InMemoryBeaconStore, N42NetworkPrimitives,
     N42NewBlock, PoaConfig, PoaValidator, SignedBeaconBlock, DEFAULT_BLOCK_TIME,
@@ -31,7 +31,8 @@ use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
 use reth_tracing::tracing::{info, warn, debug, error};
-use secp256k1::{rand, SecretKey, SECP256K1};
+// secp256k1 for P2P identity (required by devp2p protocol)
+use secp256k1::{SecretKey, SECP256K1};
 use std::{
     collections::HashSet,
     fmt,
@@ -42,6 +43,9 @@ use std::{
     time::Duration,
 };
 use tokio_stream::StreamExt;
+
+/// BLS public key type (48 bytes)
+type BLSPubkey = [u8; 48];
 
 /// Command line arguments
 struct Args {
@@ -81,6 +85,35 @@ impl Args {
 
         Self { port, bootnodes, block_time }
     }
+}
+
+/// Generate deterministic BLS-derived addresses for validators (must match poa_eth66.rs)
+fn generate_validator_addresses(count: usize) -> Vec<Address> {
+    (0..count)
+        .map(|i| {
+            // Deterministic seed for demo purposes (same as poa_eth66.rs)
+            let mut ikm = [0u8; 32];
+            ikm[0] = i as u8 + 1;
+            ikm[31] = 0x42;
+
+            let sk = blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap();
+            let pk = sk.sk_to_pk();
+            let pubkey: BLSPubkey = pk.to_bytes();
+
+            // Derive address from BLS public key (keccak256 of pubkey, last 20 bytes)
+            let hash = keccak256(&pubkey);
+            Address::from_slice(&hash[12..])
+        })
+        .collect()
+}
+
+/// Generate deterministic secp256k1 key for P2P identity
+fn generate_p2p_key() -> SecretKey {
+    // Use a different seed for sync node
+    let mut seed = [0u8; 32];
+    seed[0] = 200; // Different from validator keys
+    seed[31] = 0xAA;
+    SecretKey::from_slice(&seed).unwrap()
 }
 
 /// Sync node state - only tracks downloaded blocks, never produces
@@ -322,12 +355,10 @@ async fn main() -> eyre::Result<()> {
         warn!("No bootnodes specified! Use --bootnode <enode> to connect to validators");
     }
 
-    // Define validators (must match validator nodes)
-    let validators: Vec<Address> = (0..3)
-        .map(|i| Address::repeat_byte(i as u8 + 1))
-        .collect();
+    // Generate validator addresses (must match poa_eth66.rs)
+    let validators = generate_validator_addresses(3);
 
-    info!(validators = ?validators, "Known validator set");
+    info!(validators = ?validators, "Known validator set (BLS-derived addresses)");
 
     // Create sync node
     let sync_node = Arc::new(SyncNode::new(validators, args.block_time));
@@ -335,11 +366,11 @@ async fn main() -> eyre::Result<()> {
     // Create block import handler
     let block_import = Box::new(SyncBlockImport::new(sync_node.clone()));
 
-    // Generate secret key for this node
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
+    // Generate secp256k1 key for P2P identity (required by devp2p)
+    let secret_key = generate_p2p_key();
     let peer_id = pk2id(&secret_key.public_key(SECP256K1));
 
-    info!(peer_id = %peer_id, "Sync node identity");
+    info!(peer_id = %peer_id, "Sync node P2P identity (secp256k1)");
 
     // Build network configuration
     let local_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.port));

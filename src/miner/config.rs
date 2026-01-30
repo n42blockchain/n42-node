@@ -1,7 +1,6 @@
 //! Miner configuration.
 
 use alloy_primitives::{Address, Bytes};
-use secp256k1::SecretKey;
 use std::time::Duration;
 
 /// Default recommit interval (2 seconds).
@@ -12,6 +11,9 @@ pub const DEFAULT_GAS_CEIL: u64 = 30_000_000;
 
 /// Default minimum gas price (1 gwei).
 pub const DEFAULT_GAS_PRICE: u128 = 1_000_000_000;
+
+/// BLS Secret Key type alias.
+pub type BlsSecretKey = blst::min_pk::SecretKey;
 
 /// Miner configuration.
 #[derive(Clone)]
@@ -32,14 +34,14 @@ pub struct MinerConfig {
     /// Coinbase address (receives block rewards and fees).
     pub coinbase: Address,
 
-    /// Signing key for sealing blocks.
+    /// BLS signing key for sealing blocks.
     /// This is the private key corresponding to the validator address.
-    signing_key: SecretKey,
+    signing_key: BlsSecretKey,
 }
 
 impl MinerConfig {
     /// Create a new miner configuration.
-    pub fn new(coinbase: Address, signing_key: SecretKey) -> Self {
+    pub fn new(coinbase: Address, signing_key: BlsSecretKey) -> Self {
         Self {
             gas_ceil: DEFAULT_GAS_CEIL,
             gas_price: DEFAULT_GAS_PRICE,
@@ -75,7 +77,7 @@ impl MinerConfig {
     }
 
     /// Get the signing key reference.
-    pub fn signing_key(&self) -> &SecretKey {
+    pub fn signing_key(&self) -> &BlsSecretKey {
         &self.signing_key
     }
 
@@ -102,9 +104,14 @@ impl std::fmt::Debug for MinerConfig {
 mod tests {
     use super::*;
 
+    fn create_test_key() -> BlsSecretKey {
+        let ikm = [1u8; 32];
+        BlsSecretKey::key_gen(&ikm, &[]).unwrap()
+    }
+
     #[test]
     fn test_default_config() {
-        let key = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let key = create_test_key();
         let coinbase = Address::repeat_byte(0x01);
         let config = MinerConfig::new(coinbase, key);
 
@@ -116,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_config_builder() {
-        let key = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let key = create_test_key();
         let coinbase = Address::repeat_byte(0x01);
 
         let config = MinerConfig::new(coinbase, key)

@@ -1,4 +1,4 @@
-//! Beacon state transition for POA consensus.
+//! Beacon state transition for BLS-based consensus.
 //!
 //! This module implements the state transition function that validates
 //! and applies beacon blocks to the beacon state.
@@ -7,22 +7,31 @@
 //!
 //! 1. Process slots (advance state to block's slot)
 //! 2. Process block header (validate proposer, parent, etc.)
-//! 3. Verify block signature
+//! 3. Verify block signature (BLS)
 //! 4. Apply state changes
+//!
+//! # Trait-Based Design
+//!
+//! This module uses trait abstractions:
+//! - `StateProvider`: Access state slots, validators, domains
+//! - `ValidatorProvider`: Access validator info and pubkeys
+//! - `SignatureVerifier`: Verify BLS signatures
 //!
 //! # Simplified vs Full Ethereum
 //!
 //! This implementation skips several Ethereum PoS features:
 //! - Attestation processing (not needed for POA)
 //! - Slashing processing (can be added later)
-//! - Deposit processing (validators are fixed)
+//! - Deposit processing (validators are fixed in POA)
 //! - Voluntary exits (can be added later)
 //! - Sync committee (not needed for POA)
 
-use super::state::{compute_signing_root, BeaconBlockHeaderLight, BeaconState, DomainType};
+use super::state::{compute_signing_root, BeaconBlockHeaderLight, BeaconState, DomainType, BLSPubkey};
+use super::traits::{
+    BlsVerifier, ProposerSelector, SignatureVerifier, StateProvider, ValidatorProvider, ValidatorSignature,
+};
 use crate::primitives::SignedBeaconBlock;
 use alloy_primitives::B256;
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 
 /// Errors that can occur during state transition.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -52,7 +61,7 @@ pub enum StateTransitionError {
     InvalidSignature { proposer_index: u64 },
 
     /// Signature has wrong length.
-    #[error("signature has wrong length: expected 64 or 65, got {length}")]
+    #[error("signature has wrong length: expected 96, got {length}")]
     InvalidSignatureLength { length: usize },
 
     /// Unknown proposer.
@@ -200,9 +209,7 @@ fn process_block_header(
     Ok(())
 }
 
-/// Verify the block signature.
-///
-/// For POA, we use secp256k1 ECDSA signatures instead of BLS.
+/// Verify the block signature using BLS.
 fn verify_block_signature(
     state: &BeaconState,
     block: &SignedBeaconBlock,
@@ -219,59 +226,258 @@ fn verify_block_signature(
     let domain = state.get_domain(DomainType::BeaconProposer);
     let signing_root = compute_signing_root(block_root, domain);
 
-    // Verify signature
-    verify_secp256k1_signature(&proposer.pubkey, signing_root, &block.signature)
+    // Verify BLS signature
+    verify_bls_signature(&proposer.pubkey, signing_root, &block.signature)
         .map_err(|_| StateTransitionError::InvalidSignature { proposer_index })
 }
 
-/// Verify a secp256k1 ECDSA signature.
-fn verify_secp256k1_signature(
-    pubkey: &PublicKey,
+/// Verify a BLS signature.
+fn verify_bls_signature(
+    pubkey: &BLSPubkey,
     message_hash: B256,
     signature_bytes: &[u8],
-) -> Result<(), secp256k1::Error> {
-    let secp = Secp256k1::verification_only();
-
-    // Parse signature (64 bytes for compact format, 65 for recoverable)
-    let sig = match signature_bytes.len() {
-        64 => Signature::from_compact(signature_bytes)?,
-        65 => Signature::from_compact(&signature_bytes[..64])?, // Ignore recovery byte
-        _ => return Err(secp256k1::Error::InvalidSignature),
+) -> Result<(), &'static str> {
+    // Parse BLS public key
+    let Ok(pk) = blst::min_pk::PublicKey::from_bytes(pubkey) else {
+        return Err("Invalid public key");
     };
 
-    // Create message from hash
-    let msg = Message::from_digest(message_hash.0);
+    // Parse BLS signature (96 bytes)
+    let Ok(sig) = blst::min_pk::Signature::from_bytes(signature_bytes) else {
+        return Err("Invalid signature");
+    };
 
     // Verify
-    secp.verify_ecdsa(&msg, &sig, pubkey)
+    let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+    if sig.verify(true, message_hash.as_slice(), dst, &[], &pk, true) == blst::BLST_ERROR::BLST_SUCCESS {
+        Ok(())
+    } else {
+        Err("Signature verification failed")
+    }
 }
 
-/// Create a signed beacon block (for testing/block production).
+/// Create a signed beacon block using BLS (for testing/block production).
 ///
 /// # Arguments
 /// * `block` - The unsigned beacon block
-/// * `secret_key` - The proposer's secret key
+/// * `secret_key` - The proposer's BLS secret key
 /// * `state` - The current beacon state (for domain)
 pub fn sign_beacon_block(
     block: crate::primitives::BeaconBlock,
-    secret_key: &secp256k1::SecretKey,
+    secret_key: &blst::min_pk::SecretKey,
     state: &BeaconState,
 ) -> SignedBeaconBlock {
-    let secp = Secp256k1::signing_only();
-
     // Compute signing root
     let block_root = block.block_root();
     let domain = state.get_domain(DomainType::BeaconProposer);
     let signing_root = compute_signing_root(block_root, domain);
 
-    // Sign
-    let msg = Message::from_digest(signing_root.0);
-    let sig = secp.sign_ecdsa(&msg, secret_key);
+    // Sign with BLS
+    let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+    let sig = secret_key.sign(signing_root.as_slice(), dst, &[]);
 
-    // Serialize signature (compact format)
-    let sig_bytes = sig.serialize_compact();
+    // Serialize signature (96 bytes)
+    let sig_bytes = sig.to_bytes();
 
     SignedBeaconBlock::new(block, alloy_primitives::Bytes::copy_from_slice(&sig_bytes))
+}
+
+// =============================================================================
+// Trait-Based Generic Validation Functions
+// =============================================================================
+
+/// Validate a block proposer using trait abstractions.
+///
+/// This function works with any state that implements `ValidatorProvider` and
+/// `ProposerSelector`.
+///
+/// # Arguments
+/// * `state` - Any state implementing required traits
+/// * `slot` - The slot being validated
+/// * `proposer_index` - The claimed proposer index
+///
+/// # Returns
+/// * `Ok(())` if the proposer is valid
+/// * `Err(StateTransitionError)` if validation fails
+pub fn validate_proposer<S>(
+    state: &S,
+    slot: u64,
+    proposer_index: u64,
+) -> StateTransitionResult<()>
+where
+    S: ValidatorProvider + ProposerSelector,
+{
+    // Verify proposer index matches expected
+    let expected_proposer = state.get_proposer_index_for_slot(slot);
+    if proposer_index != expected_proposer {
+        return Err(StateTransitionError::ProposerIndexMismatch {
+            slot,
+            expected: expected_proposer,
+            actual: proposer_index,
+        });
+    }
+
+    // Verify proposer exists and is active
+    let validator_info = state
+        .get_validator_info(proposer_index)
+        .ok_or(StateTransitionError::UnknownProposer { index: proposer_index })?;
+
+    if !validator_info.is_active {
+        return Err(StateTransitionError::ProposerNotActive { index: proposer_index });
+    }
+
+    Ok(())
+}
+
+/// Verify a block signature using trait abstractions.
+///
+/// This function works with any combination of state and signature verifier.
+///
+/// # Arguments
+/// * `state` - Any state implementing `ValidatorProvider` and `StateProvider`
+/// * `verifier` - Any signature verifier
+/// * `proposer_index` - The proposer's validator index
+/// * `block_root` - The block root to verify
+/// * `signature` - The signature to verify
+///
+/// # Returns
+/// * `Ok(())` if the signature is valid
+/// * `Err(StateTransitionError)` if verification fails
+pub fn verify_signature_generic<S, V>(
+    state: &S,
+    verifier: &V,
+    proposer_index: u64,
+    block_root: B256,
+    signature: &ValidatorSignature,
+) -> StateTransitionResult<()>
+where
+    S: ValidatorProvider + StateProvider,
+    V: SignatureVerifier,
+{
+    // Get proposer's public key
+    let pubkey = state
+        .get_validator_pubkey(proposer_index)
+        .ok_or(StateTransitionError::UnknownProposer { index: proposer_index })?;
+
+    // Compute signing root
+    let domain = state.get_domain(0); // BeaconProposer domain
+    let signing_root = compute_signing_root(block_root, domain);
+
+    // Verify signature
+    if !verifier.verify_signature(&pubkey, signing_root.as_slice(), signature) {
+        return Err(StateTransitionError::InvalidSignature { proposer_index });
+    }
+
+    Ok(())
+}
+
+/// Process slots generically for any StateProvider.
+///
+/// # Arguments
+/// * `state` - Any mutable state implementing `StateProvider`
+/// * `target_slot` - The target slot to advance to
+/// * `max_slots` - Maximum slots to process
+///
+/// # Returns
+/// * `Ok(())` if slots were processed successfully
+/// * `Err(StateTransitionError)` if validation fails
+pub fn process_slots_generic<S>(
+    state: &mut S,
+    target_slot: u64,
+    max_slots: u64,
+) -> StateTransitionResult<()>
+where
+    S: StateProvider,
+{
+    let current_slot = state.current_slot();
+
+    // Block must be for a future slot
+    if target_slot <= current_slot {
+        return Err(StateTransitionError::SlotNotIncreasing {
+            block_slot: target_slot,
+            state_slot: current_slot,
+        });
+    }
+
+    // Don't allow skipping too many slots
+    let slots_to_process = target_slot - current_slot;
+    if slots_to_process > max_slots {
+        return Err(StateTransitionError::SlotTooFarAhead {
+            block_slot: target_slot,
+            state_slot: current_slot,
+        });
+    }
+
+    // Advance slot by slot
+    while state.current_slot() < target_slot {
+        state.advance_slot();
+    }
+
+    Ok(())
+}
+
+/// Context for trait-based block validation.
+///
+/// This struct bundles together the state and verifier needed for
+/// generic block validation.
+pub struct ValidationContext<'a, S, V> {
+    /// The current state
+    pub state: &'a S,
+    /// The signature verifier
+    pub verifier: &'a V,
+    /// Configuration options
+    pub config: &'a StateTransitionConfig,
+}
+
+impl<'a, S, V> ValidationContext<'a, S, V>
+where
+    S: ValidatorProvider + ProposerSelector + StateProvider,
+    V: SignatureVerifier,
+{
+    /// Create a new validation context.
+    pub fn new(state: &'a S, verifier: &'a V, config: &'a StateTransitionConfig) -> Self {
+        Self { state, verifier, config }
+    }
+
+    /// Validate a block header (proposer and parent).
+    pub fn validate_header(
+        &self,
+        slot: u64,
+        proposer_index: u64,
+        parent_root: B256,
+        expected_parent_root: B256,
+    ) -> StateTransitionResult<()> {
+        // Verify parent root
+        if parent_root != expected_parent_root {
+            return Err(StateTransitionError::ParentRootMismatch {
+                expected: expected_parent_root,
+                actual: parent_root,
+            });
+        }
+
+        // Validate proposer
+        validate_proposer(self.state, slot, proposer_index)
+    }
+
+    /// Validate a block signature.
+    pub fn validate_signature(
+        &self,
+        proposer_index: u64,
+        block_root: B256,
+        signature: &ValidatorSignature,
+    ) -> StateTransitionResult<()> {
+        if !self.config.verify_signatures {
+            return Ok(());
+        }
+
+        verify_signature_generic(
+            self.state,
+            self.verifier,
+            proposer_index,
+            block_root,
+            signature,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -279,19 +485,23 @@ mod tests {
     use super::*;
     use crate::consensus::state::BeaconValidator;
     use crate::primitives::{BeaconBlock, BeaconBlockBody};
-    use secp256k1::SecretKey;
 
-    fn create_test_state() -> (BeaconState, Vec<SecretKey>) {
-        let secp = Secp256k1::new();
+    fn create_test_state() -> (BeaconState, Vec<blst::min_pk::SecretKey>) {
+        // Create deterministic BLS secret keys for testing
         let secrets: Vec<_> = (0..4)
-            .map(|i| SecretKey::from_slice(&[i as u8 + 1; 32]).unwrap())
+            .map(|i| {
+                let mut ikm = [0u8; 32];
+                ikm[0] = i as u8 + 1;
+                blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap()
+            })
             .collect();
 
         let validators: Vec<_> = secrets
             .iter()
             .enumerate()
             .map(|(i, sk)| {
-                let pubkey = PublicKey::from_secret_key(&secp, sk);
+                let pk = sk.sk_to_pk();
+                let pubkey: BLSPubkey = pk.to_bytes();
                 BeaconValidator::new(pubkey, i as u64)
             })
             .collect();
@@ -431,5 +641,78 @@ mod tests {
         }
 
         assert_eq!(state.slot, 4);
+    }
+
+    // =========================================================================
+    // Trait-based validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_proposer_generic() {
+        let (state, _) = create_test_state();
+
+        // Valid proposer for slot 0 is validator 0
+        assert!(validate_proposer(&state, 0, 0).is_ok());
+
+        // Valid proposer for slot 1 is validator 1
+        assert!(validate_proposer(&state, 1, 1).is_ok());
+
+        // Wrong proposer should fail
+        assert!(matches!(
+            validate_proposer(&state, 1, 0),
+            Err(StateTransitionError::ProposerIndexMismatch { .. })
+        ));
+
+        // Unknown proposer should fail
+        assert!(matches!(
+            validate_proposer(&state, 0, 100),
+            Err(StateTransitionError::ProposerIndexMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_process_slots_generic() {
+        let (mut state, _) = create_test_state();
+
+        // Should advance from slot 0 to slot 5
+        assert!(process_slots_generic(&mut state, 5, 32).is_ok());
+        assert_eq!(state.current_slot(), 5);
+
+        // Should fail if target is not increasing
+        assert!(matches!(
+            process_slots_generic(&mut state, 3, 32),
+            Err(StateTransitionError::SlotNotIncreasing { .. })
+        ));
+
+        // Should fail if too many slots
+        assert!(matches!(
+            process_slots_generic(&mut state, 100, 10),
+            Err(StateTransitionError::SlotTooFarAhead { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validation_context() {
+        let (state, _) = create_test_state();
+        let verifier = BlsVerifier;
+        let config = StateTransitionConfig::default();
+
+        let ctx = ValidationContext::new(&state, &verifier, &config);
+
+        // Validate header with correct parent
+        let parent_root = state.latest_block_header.block_root();
+        assert!(ctx.validate_header(1, 1, parent_root, parent_root).is_ok());
+
+        // Wrong parent should fail
+        assert!(matches!(
+            ctx.validate_header(1, 1, B256::ZERO, parent_root),
+            Err(StateTransitionError::ParentRootMismatch { .. })
+        ));
+
+        // Wrong proposer should fail
+        assert!(matches!(
+            ctx.validate_header(1, 0, parent_root, parent_root),
+            Err(StateTransitionError::ProposerIndexMismatch { .. })
+        ));
     }
 }

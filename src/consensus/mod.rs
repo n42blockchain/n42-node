@@ -41,6 +41,8 @@ pub mod fork_choice;
 pub mod reorg;
 pub mod state;
 pub mod state_transition;
+pub mod traits;
+pub mod unified;
 mod validator;
 mod worker;
 
@@ -52,6 +54,8 @@ pub use state::{
 pub use state_transition::{
     process_block, sign_beacon_block, StateTransitionConfig, StateTransitionError,
     StateTransitionResult,
+    // Trait-based generic functions
+    validate_proposer, verify_signature_generic, process_slots_generic, ValidationContext,
 };
 pub use validator::{
     get_difficulty_from_graffiti, set_difficulty_in_graffiti, PoaValidationError, PoaValidator,
@@ -67,6 +71,18 @@ pub use fork_choice::{CliqueForkChoice, ForkChoiceDecision, ForkChoiceError, MAX
 pub use reorg::{
     ChannelEngineNotifier, EngineApiNotifier, ForkchoiceState, NoopEngineNotifier,
     ReorgConfig, ReorgError, ReorgEvent, ReorgExecutor, ReorgStats,
+};
+
+// Consensus traits (BLS signatures)
+pub use traits::{
+    BlsVerifier, ProposerSelector, SignatureVerifier, StateProvider,
+    ValidatorInfo, ValidatorProvider, ValidatorPubkey, ValidatorSignature,
+};
+
+// Unified consensus interface
+pub use unified::{
+    ConsensusState, ConsensusVerifier, DefaultVerifier,
+    create_pubkey, create_signature, default_verifier,
 };
 
 /// In-turn difficulty value (when it's the validator's assigned slot)

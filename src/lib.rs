@@ -59,7 +59,6 @@ use eyre as _;
 use reth_discv4 as _;
 use reth_network_api as _;
 use reth_network_peers as _;
-use secp256k1 as _;
 use tokio_stream as _;
 
 pub mod consensus;
@@ -118,6 +117,20 @@ pub use consensus::{
 pub use consensus::{
     process_block, sign_beacon_block, BeaconBlockHeaderLight, BeaconState, BeaconValidator,
     Checkpoint, DomainType, StateTransitionConfig, StateTransitionError, StateTransitionResult,
+    // Trait-based generic validation functions
+    validate_proposer, verify_signature_generic, process_slots_generic, ValidationContext,
+};
+
+// Re-export consensus traits (BLS signatures)
+pub use consensus::{
+    BlsVerifier, ProposerSelector, SignatureVerifier, StateProvider,
+    ValidatorInfo, ValidatorProvider, ValidatorPubkey, ValidatorSignature,
+};
+
+// Re-export unified consensus interface
+pub use consensus::{
+    ConsensusState, ConsensusVerifier, DefaultVerifier,
+    create_pubkey, create_signature, default_verifier,
 };
 
 // Re-export Clique POA consensus types
@@ -165,7 +178,7 @@ pub use pos::{
     beacon_chain_spec,
     // Validator types
     Validator as PosValidator,
-    ValidatorInfo,
+    ValidatorInfo as PosValidatorInfo,
     ValidatorBeforeTx,
     ValidatorChangeset,
     ValidatorRevert,

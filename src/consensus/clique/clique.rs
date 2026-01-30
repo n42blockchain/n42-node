@@ -1,4 +1,4 @@
-//! Clique proof-of-authority consensus engine implementation.
+//! Clique proof-of-authority consensus engine implementation with BLS signatures.
 
 use super::{
     database::SnapshotDatabase,
@@ -10,8 +10,10 @@ use super::{
 use alloy_primitives::{keccak256, Address, B256};
 use lru::LruCache;
 use parking_lot::RwLock;
-use secp256k1::{ecdsa::RecoverableSignature, Message, Secp256k1};
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc, time::SystemTime};
+
+/// BLS public key type (48 bytes).
+pub type BLSPubkey = [u8; 48];
 
 /// Chain header reader trait for accessing blockchain headers.
 pub trait ChainHeaderReader: Send + Sync {
@@ -38,7 +40,7 @@ pub struct ChainConfig {
     pub max_gas_limit: u64,
 }
 
-/// Clique proof-of-authority consensus engine.
+/// Clique proof-of-authority consensus engine with BLS signatures.
 pub struct Clique<DB: SnapshotDatabase> {
     /// Consensus engine configuration.
     config: CliqueConfig,
@@ -58,8 +60,8 @@ pub struct Clique<DB: SnapshotDatabase> {
     /// Ethereum address of the signing key.
     signer: RwLock<Option<Address>>,
 
-    /// Secp256k1 context for signature operations.
-    secp: Secp256k1<secp256k1::All>,
+    /// Mapping of addresses to BLS public keys for signature verification.
+    pubkey_map: RwLock<HashMap<Address, BLSPubkey>>,
 
     /// Skip difficulty verifications (for testing).
     fake_diff: bool,
@@ -79,7 +81,7 @@ impl<DB: SnapshotDatabase> Clique<DB> {
             )),
             proposals: RwLock::new(HashMap::new()),
             signer: RwLock::new(None),
-            secp: Secp256k1::new(),
+            pubkey_map: RwLock::new(HashMap::new()),
             fake_diff: false,
         }
     }
@@ -101,6 +103,11 @@ impl<DB: SnapshotDatabase> Clique<DB> {
         *self.signer.write() = Some(signer);
     }
 
+    /// Register a validator's BLS public key.
+    pub fn register_pubkey(&self, address: Address, pubkey: BLSPubkey) {
+        self.pubkey_map.write().insert(address, pubkey);
+    }
+
     /// Get the current signer.
     pub fn signer(&self) -> Option<Address> {
         *self.signer.read()
@@ -116,7 +123,10 @@ impl<DB: SnapshotDatabase> Clique<DB> {
         self.proposals.write().remove(&address);
     }
 
-    /// Extract the Ethereum address from a signed header.
+    /// Verify the signature on a header and return the signer address.
+    ///
+    /// With BLS signatures, we cannot recover the signer from the signature.
+    /// Instead, we try each known signer's public key until we find a match.
     pub fn ecrecover(&self, header: &HeaderData) -> Result<Address, CliqueError> {
         let hash = header.hash;
 
@@ -131,12 +141,27 @@ impl<DB: SnapshotDatabase> Clique<DB> {
         // Calculate seal hash (header hash without signature)
         let seal_hash = self.seal_hash(header);
 
-        // Recover the public key
-        let address = self.recover_address(&seal_hash, signature)?;
+        // Try to verify against known signers
+        let pubkey_map = self.pubkey_map.read();
+        for (address, pubkey) in pubkey_map.iter() {
+            if self.verify_bls_signature(&seal_hash, signature, pubkey) {
+                // Cache and return
+                self.signatures.write().put(hash, *address);
+                return Ok(*address);
+            }
+        }
 
-        // Cache and return
-        self.signatures.write().put(hash, address);
-        Ok(address)
+        // If we have the coinbase address, try that as a hint
+        if let Some(pubkey) = pubkey_map.get(&header.coinbase) {
+            if self.verify_bls_signature(&seal_hash, signature, pubkey) {
+                self.signatures.write().put(hash, header.coinbase);
+                return Ok(header.coinbase);
+            }
+        }
+
+        Err(CliqueError::SignatureRecoveryFailed {
+            message: "No matching signer found for BLS signature".to_string(),
+        })
     }
 
     /// Calculate the seal hash (hash of header without signature).
@@ -158,49 +183,21 @@ impl<DB: SnapshotDatabase> Clique<DB> {
         keccak256(&data)
     }
 
-    /// Recover address from signature.
-    fn recover_address(&self, hash: &B256, signature: &[u8]) -> Result<Address, CliqueError> {
-        if signature.len() != 65 {
-            return Err(CliqueError::MissingSignature);
-        }
+    /// Verify a BLS signature.
+    fn verify_bls_signature(&self, hash: &B256, signature: &[u8], pubkey: &BLSPubkey) -> bool {
+        // Parse BLS public key
+        let Ok(pk) = blst::min_pk::PublicKey::from_bytes(pubkey) else {
+            return false;
+        };
 
-        // Parse recovery id (last byte)
-        // Handle both 0/1 and 27/28 formats for recovery id
-        let v = signature[64];
-        let recovery_id_value = if v >= 27 { v - 27 } else { v } as i32;
-        let recovery_id = secp256k1::ecdsa::RecoveryId::try_from(recovery_id_value)
-            .map_err(|e| CliqueError::SignatureRecoveryFailed {
-                message: format!("invalid recovery id {}: {}", recovery_id_value, e),
-            })?;
+        // Parse BLS signature (96 bytes)
+        let Ok(sig) = blst::min_pk::Signature::from_bytes(signature) else {
+            return false;
+        };
 
-        // Parse signature (first 64 bytes)
-        let sig = RecoverableSignature::from_compact(&signature[..64], recovery_id).map_err(
-            |e| CliqueError::SignatureRecoveryFailed {
-                message: e.to_string(),
-            },
-        )?;
-
-        // Create message
-        let message = Message::from_digest_slice(hash.as_slice()).map_err(|e| {
-            CliqueError::SignatureRecoveryFailed {
-                message: e.to_string(),
-            }
-        })?;
-
-        // Recover public key
-        let pubkey = self
-            .secp
-            .recover_ecdsa(&message, &sig)
-            .map_err(|e| CliqueError::SignatureRecoveryFailed {
-                message: e.to_string(),
-            })?;
-
-        // Convert to address (last 20 bytes of keccak256(pubkey))
-        let pubkey_bytes = pubkey.serialize_uncompressed();
-        let hash = keccak256(&pubkey_bytes[1..]); // Skip the 0x04 prefix
-        let address = Address::from_slice(&hash[12..]);
-
-        Ok(address)
+        // Verify
+        let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+        sig.verify(true, hash.as_slice(), dst, &[], &pk, true) == blst::BLST_ERROR::BLST_SUCCESS
     }
 
     /// Retrieve the snapshot at a given point.

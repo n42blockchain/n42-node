@@ -3,7 +3,7 @@
 //! This implements a Proof-of-Authority node that:
 //! - Uses reth's NetworkManager with eth66/67/68 protocols
 //! - Uses Clique consensus engine for round-robin block production
-//! - Proper signature verification with ecrecover
+//! - BLS signature for block sealing
 //! - Snapshot-based signer authorization
 //!
 //! Run with:
@@ -41,7 +41,8 @@ use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
 use reth_tracing::tracing::{info, warn, debug};
-use secp256k1::{Message, SecretKey, SECP256K1};
+// secp256k1 for P2P identity (required by devp2p protocol)
+use secp256k1::{SecretKey, SECP256K1};
 use std::{
     collections::HashMap,
     fmt,
@@ -53,6 +54,9 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+
+/// BLS public key type (48 bytes)
+type BLSPubkey = [u8; 48];
 
 /// Default block time in seconds
 const DEFAULT_BLOCK_TIME: u64 = 5;
@@ -137,7 +141,7 @@ impl CliqueChainReader {
             Address::ZERO
         };
 
-        // Build extra data: [vanity 32 bytes] + [signature 65 bytes]
+        // Build extra data: [vanity 32 bytes] + [signature 96 bytes for BLS]
         let mut extra = vec![0u8; EXTRA_VANITY];
         extra.extend_from_slice(&block.signature);
 
@@ -210,10 +214,12 @@ struct PoaNode {
     validator_index: usize,
     /// This validator's address
     validator_address: Address,
-    /// Signing key
-    signing_key: SecretKey,
+    /// BLS signing key
+    bls_signing_key: blst::min_pk::SecretKey,
     /// All validator addresses (in order)
     validators: Vec<Address>,
+    /// Validator BLS public keys (for signature verification)
+    validator_pubkeys: Vec<BLSPubkey>,
     /// Last produced slot
     last_produced_slot: RwLock<Option<u64>>,
     /// Block time in seconds
@@ -225,8 +231,9 @@ struct PoaNode {
 impl PoaNode {
     fn new(
         validators: Vec<Address>,
+        validator_pubkeys: Vec<BLSPubkey>,
         validator_index: usize,
-        signing_key: SecretKey,
+        bls_signing_key: blst::min_pk::SecretKey,
         block_time: u64,
     ) -> Self {
         let store = Arc::new(InMemoryBeaconStore::new());
@@ -247,6 +254,11 @@ impl PoaNode {
         // Authorize this signer
         let validator_address = validators[validator_index];
         clique.authorize(validator_address);
+
+        // Register all validator pubkeys for signature verification
+        for (addr, pubkey) in validators.iter().zip(validator_pubkeys.iter()) {
+            clique.register_pubkey(*addr, *pubkey);
+        }
 
         // Create deterministic genesis block (same for all nodes)
         let genesis = Self::create_genesis_block(&validators, block_time);
@@ -271,8 +283,9 @@ impl PoaNode {
             blocks_by_hash: RwLock::new(blocks_by_hash),
             validator_index,
             validator_address,
-            signing_key,
+            bls_signing_key,
             validators,
+            validator_pubkeys,
             last_produced_slot: RwLock::new(Some(0)), // Genesis is at slot 0
             block_time,
             genesis_hash,
@@ -306,7 +319,7 @@ impl PoaNode {
 
         // Genesis signature is deterministic (all zeros for simplicity)
         // In production, this would be signed by validator 0
-        let signature = Bytes::from(vec![0u8; 65]);
+        let signature = Bytes::from(vec![0u8; 96]); // BLS signature is 96 bytes
 
         SignedBeaconBlock::new(block, signature)
     }
@@ -317,111 +330,9 @@ impl PoaNode {
         now / self.block_time
     }
 
-    /// Check if this validator is in-turn for the given slot
-    /// NOTE: Now handled by miner module, kept for reference
-    #[allow(dead_code)]
-    fn is_in_turn(&self, slot: u64) -> bool {
-        let expected_index = (slot as usize) % self.validators.len();
-        expected_index == self.validator_index
-    }
-
-    /// Sign data with the node's private key
-    /// NOTE: Now handled by miner module, kept for reference
-    #[allow(dead_code)]
-    fn sign(&self, data: &[u8]) -> Vec<u8> {
-        let hash = keccak256(data);
-        let message = Message::from_digest_slice(hash.as_slice()).unwrap();
-        let (recovery_id, signature) = SECP256K1
-            .sign_ecdsa_recoverable(&message, &self.signing_key)
-            .serialize_compact();
-
-        // Return 65 bytes: [r (32)] [s (32)] [v (1)]
-        let mut sig = Vec::with_capacity(65);
-        sig.extend_from_slice(&signature);
-        sig.push(i32::from(recovery_id) as u8);
-        sig
-    }
-
-    /// Produce a block for the given slot
-    /// NOTE: Now handled by miner module, kept for reference
-    #[allow(dead_code)]
-    fn produce_block(&self, slot: u64) -> Option<SignedBeaconBlock> {
-        // Check if we already produced for this slot
-        {
-            let last_slot = self.last_produced_slot.read().unwrap();
-            if *last_slot == Some(slot) {
-                return None;
-            }
-        }
-
-        // Get parent block
-        let parent = self.store.latest_block().ok().flatten();
-        let parent_root = parent.as_ref().map(|b| b.block_root()).unwrap_or_default();
-        let parent_slot = parent.as_ref().map(|b| b.slot()).unwrap_or(0);
-
-        // Only produce if slot is after parent
-        if slot <= parent_slot {
-            return None;
-        }
-
-        // Calculate difficulty based on turn
-        let difficulty = if self.is_in_turn(slot) {
-            CLIQUE_DIFF_IN_TURN
-        } else {
-            CLIQUE_DIFF_NO_TURN
-        };
-
-        // Create graffiti with coinbase (validator address) in first 20 bytes
-        let mut graffiti = B256::ZERO;
-        graffiti.as_mut_slice()[..20].copy_from_slice(self.validator_address.as_slice());
-
-        // Create block body
-        let body = BeaconBlockBody {
-            graffiti,
-            ..Default::default()
-        };
-
-        // Create unsigned block with POA difficulty
-        let block = BeaconBlock::new(
-            slot,
-            self.validator_index as u64,
-            parent_root,
-            B256::random(), // state_root (simplified)
-            body,
-            difficulty,
-        );
-
-        // Create seal hash (hash of block content for signing)
-        let seal_data = self.create_seal_data(&block);
-        let signature = self.sign(&seal_data);
-
-        // Create signed block
-        let signed = SignedBeaconBlock::new(block, Bytes::from(signature));
-
-        // Update last produced slot
-        *self.last_produced_slot.write().unwrap() = Some(slot);
-
-        info!(
-            slot = slot,
-            difficulty = difficulty,
-            in_turn = self.is_in_turn(slot),
-            parent_slot = parent_slot,
-            parent_hash = %parent_root,
-            signer = %self.validator_address,
-            "Produced block"
-        );
-
-        Some(signed)
-    }
-
-    /// Create data to be signed for the seal
-    fn create_seal_data(&self, block: &BeaconBlock) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(block.parent_root.as_slice());
-        data.extend_from_slice(&block.slot.to_be_bytes());
-        data.extend_from_slice(&(block.slot * self.block_time).to_be_bytes());
-        data.extend_from_slice(block.body.graffiti.as_slice());
-        data
+    /// Create data to be signed for the seal (block root)
+    fn create_seal_data(&self, block: &BeaconBlock) -> B256 {
+        block.block_root()
     }
 
     /// Process a received block from the network
@@ -474,12 +385,14 @@ impl PoaNode {
             );
         }
 
-        // Recover signer for logging
-        let signer = self.recover_signer(block).unwrap_or(Address::ZERO);
+        // Verify BLS signature
+        let signer = self.verify_block_signature(block);
 
         // Verify signer is a known validator
-        if !self.validators.contains(&signer) && signer != Address::ZERO {
-            return Err(format!("unknown signer: {}", signer));
+        if let Some(signer_addr) = signer {
+            if !self.validators.contains(&signer_addr) {
+                return Err(format!("unknown signer: {}", signer_addr));
+            }
         }
 
         // Store block in our database
@@ -499,7 +412,7 @@ impl PoaNode {
             slot = slot,
             hash = %hash,
             parent = %parent_hash,
-            signer = %signer,
+            signer = ?signer,
             peer = %peer_id,
             "Accepted block from network"
         );
@@ -507,30 +420,35 @@ impl PoaNode {
         Ok(true)
     }
 
-    /// Recover signer address from block signature
-    fn recover_signer(&self, block: &SignedBeaconBlock) -> Option<Address> {
-        if block.signature.len() != 65 {
+    /// Verify block signature and return signer address if valid.
+    /// BLS does not support key recovery, so we try all known validators.
+    fn verify_block_signature(&self, block: &SignedBeaconBlock) -> Option<Address> {
+        if block.signature.len() != 96 {
             return None;
         }
 
-        let seal_data = self.create_seal_data(&block.message);
-        let hash = keccak256(&seal_data);
+        let seal_hash = self.create_seal_data(&block.message);
+        let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
         // Parse signature
-        let v = block.signature[64];
-        let recovery_id = secp256k1::ecdsa::RecoveryId::try_from(v as i32).ok()?;
-        let sig = secp256k1::ecdsa::RecoverableSignature::from_compact(
-            &block.signature[..64],
-            recovery_id,
-        ).ok()?;
+        let Ok(sig) = blst::min_pk::Signature::from_bytes(block.signature.as_ref()) else {
+            return None;
+        };
 
-        let message = Message::from_digest_slice(hash.as_slice()).ok()?;
-        let pubkey = SECP256K1.recover_ecdsa(&message, &sig).ok()?;
+        // Try all known validators
+        for (i, pubkey) in self.validator_pubkeys.iter().enumerate() {
+            let Ok(pk) = blst::min_pk::PublicKey::from_bytes(pubkey) else {
+                continue;
+            };
 
-        // Convert pubkey to address
-        let pubkey_bytes = pubkey.serialize_uncompressed();
-        let addr_hash = keccak256(&pubkey_bytes[1..]);
-        Some(Address::from_slice(&addr_hash[12..]))
+            if sig.verify(true, seal_hash.as_slice(), dst, &[], &pk, true)
+                == blst::BLST_ERROR::BLST_SUCCESS
+            {
+                return Some(self.validators[i]);
+            }
+        }
+
+        None
     }
 }
 
@@ -649,6 +567,36 @@ fn create_new_block_message(beacon: &SignedBeaconBlock, block_time: u64) -> N42N
     NewBlock { block, td }
 }
 
+/// Generate deterministic BLS keys for validators
+fn generate_bls_keys(count: usize) -> Vec<(blst::min_pk::SecretKey, BLSPubkey, Address)> {
+    (0..count)
+        .map(|i| {
+            // Deterministic seed for demo purposes
+            let mut ikm = [0u8; 32];
+            ikm[0] = i as u8 + 1;
+            ikm[31] = 0x42;
+
+            let sk = blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap();
+            let pk = sk.sk_to_pk();
+            let pubkey: BLSPubkey = pk.to_bytes();
+
+            // Derive address from BLS public key (keccak256 of pubkey, last 20 bytes)
+            let hash = keccak256(&pubkey);
+            let address = Address::from_slice(&hash[12..]);
+
+            (sk, pubkey, address)
+        })
+        .collect()
+}
+
+/// Generate deterministic secp256k1 key for P2P identity
+fn generate_p2p_key(index: usize) -> SecretKey {
+    let mut seed = [0u8; 32];
+    seed[0] = index as u8 + 100; // Different range from BLS keys
+    seed[31] = 0x99;
+    SecretKey::from_slice(&seed).unwrap()
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Initialize tracing
@@ -667,56 +615,43 @@ async fn main() -> eyre::Result<()> {
         validator_index = args.validator_index,
         port = args.port,
         block_time = args.block_time,
-        "Starting POA eth66 node with Clique consensus"
+        "Starting POA eth66 node with BLS signatures"
     );
 
-    // Generate deterministic validator keys based on index
-    // In production, these would be loaded from secure storage
-    let validator_keys: Vec<SecretKey> = (0..3)
-        .map(|i| {
-            // Use a deterministic seed for demo purposes
-            let mut seed = [0u8; 32];
-            seed[0] = i as u8 + 1;
-            seed[31] = 0x42;
-            SecretKey::from_slice(&seed).unwrap()
-        })
-        .collect();
+    // Generate BLS keys for all validators
+    let bls_keys = generate_bls_keys(3);
 
-    // Derive addresses from keys
-    let validators: Vec<Address> = validator_keys
-        .iter()
-        .map(|key| {
-            let pubkey = key.public_key(SECP256K1);
-            let pubkey_bytes = pubkey.serialize_uncompressed();
-            let hash = keccak256(&pubkey_bytes[1..]);
-            Address::from_slice(&hash[12..])
-        })
-        .collect();
+    let validators: Vec<Address> = bls_keys.iter().map(|(_, _, addr)| *addr).collect();
+    let validator_pubkeys: Vec<BLSPubkey> = bls_keys.iter().map(|(_, pk, _)| *pk).collect();
 
     info!(
         validators = ?validators,
         this_validator = ?validators[args.validator_index],
-        "Validator set (addresses derived from keys)"
+        "Validator set (addresses derived from BLS public keys)"
     );
 
-    // Get this validator's key
-    let signing_key = validator_keys[args.validator_index].clone();
+    // Get this validator's BLS key
+    let bls_signing_key = bls_keys[args.validator_index].0.clone();
+
+    // Generate secp256k1 key for P2P identity (required by devp2p)
+    let p2p_key = generate_p2p_key(args.validator_index);
 
     // Create POA node with Clique
     let poa_node = Arc::new(PoaNode::new(
         validators.clone(),
+        validator_pubkeys.clone(),
         args.validator_index,
-        signing_key.clone(),
+        bls_signing_key.clone(),
         args.block_time,
     ));
 
     // Create block import handler
     let block_import = Box::new(N42BlockImport::new(poa_node.clone()));
 
-    // Use the signing key for P2P identity as well
-    let peer_id = pk2id(&signing_key.public_key(SECP256K1));
+    // Use secp256k1 key for P2P identity
+    let peer_id = pk2id(&p2p_key.public_key(SECP256K1));
 
-    info!(peer_id = %peer_id, "Node identity");
+    info!(peer_id = %peer_id, "Node P2P identity (secp256k1)");
 
     // Build network configuration
     let local_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.port));
@@ -732,7 +667,7 @@ async fn main() -> eyre::Result<()> {
         .build();
 
     let mut net_builder: reth_network::NetworkConfigBuilder<N42NetworkPrimitives> =
-        NetworkConfig::builder(signing_key)
+        NetworkConfig::builder(p2p_key.clone())
             .with_pow()
             .set_addrs(local_addr)
             .hello_message(hello_message)
@@ -771,8 +706,8 @@ async fn main() -> eyre::Result<()> {
 
     let (block_tx, mut block_rx) = mpsc::channel::<SignedBeaconBlock>(32);
 
-    // Create miner configuration
-    let miner_config = MinerConfig::new(validators[args.validator_index], signing_key.clone())
+    // Create miner configuration with BLS key
+    let miner_config = MinerConfig::new(validators[args.validator_index], bls_signing_key)
         .with_recommit_interval(Duration::from_secs(2));
 
     // Create POA attributes provider
@@ -791,7 +726,7 @@ async fn main() -> eyre::Result<()> {
         args.validator_index as u64,
     );
 
-    info!("Miner worker started with wiggle delay support");
+    info!("Miner worker started with BLS signing and wiggle delay support");
 
     // Spawn block producer that uses the miner
     let poa_clone = poa_node.clone();
@@ -845,7 +780,7 @@ async fn main() -> eyre::Result<()> {
                         slot = block.slot(),
                         hash = %hash,
                         latency_ms = result.seal_latency.as_millis(),
-                        "Miner sealed block"
+                        "Miner sealed block with BLS signature"
                     );
 
                     // Store in blocks_by_hash

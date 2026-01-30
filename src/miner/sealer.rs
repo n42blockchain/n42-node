@@ -1,7 +1,7 @@
 //! Block Sealing Module
 //!
 //! This module implements the seal delay calculation and block signing
-//! for Clique POA consensus.
+//! for POA consensus with BLS signatures.
 //!
 //! # Seal Delay (Wiggle)
 //!
@@ -18,17 +18,18 @@
 //!
 //! # Block Signing
 //!
-//! Blocks are signed using secp256k1 ECDSA with recoverable signatures (65 bytes).
+//! Blocks are signed using BLS signatures (96 bytes).
 //! The signature is computed over the block's seal hash (header hash without signature).
 
 use crate::primitives::{BeaconBlock, SignedBeaconBlock};
 use alloy_primitives::{Bytes, B256};
-use secp256k1::rand::Rng;
-use secp256k1::{ecdsa::RecoverableSignature, Message, Secp256k1, SecretKey};
 use std::time::Duration;
 
 /// Wiggle time unit (500ms) - base delay per signer position.
 pub const WIGGLE_TIME_MS: u64 = 500;
+
+/// BLS public key type (48 bytes).
+pub type BLSPubkey = [u8; 48];
 
 /// Mining environment for seal delay calculation.
 #[derive(Debug, Clone)]
@@ -99,12 +100,20 @@ pub fn calculate_seal_delay(env: &MiningEnvironment) -> Duration {
 ///
 /// Formula: random(0..(num_signers / 2 + 1) * 500ms)
 fn calculate_wiggle_delay(num_signers: usize) -> Duration {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     if num_signers == 0 {
         return Duration::ZERO;
     }
 
     let wiggle_base_ms = ((num_signers / 2) + 1) as u64 * WIGGLE_TIME_MS;
-    let random_ms = secp256k1::rand::thread_rng().gen_range(0..wiggle_base_ms);
+
+    // Simple random using system time as seed
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let random_ms = seed % wiggle_base_ms;
 
     Duration::from_millis(random_ms)
 }
@@ -121,33 +130,29 @@ pub fn calculate_wiggle_delay_deterministic(num_signers: usize, seed: u64) -> Du
     Duration::from_millis(random_ms)
 }
 
-/// Seal (sign) a beacon block.
+/// Seal (sign) a beacon block using BLS.
 ///
-/// Creates a signed beacon block with a secp256k1 ECDSA signature.
-/// The signature is 65 bytes: [r(32) | s(32) | v(1)]
+/// Creates a signed beacon block with a BLS signature.
+/// The signature is 96 bytes.
 ///
 /// # Arguments
 /// * `block` - The unsigned beacon block
-/// * `secret_key` - The validator's signing key
+/// * `secret_key` - The validator's BLS signing key
 ///
 /// # Returns
 /// A signed beacon block with the signature field populated.
-pub fn seal_block(block: BeaconBlock, secret_key: &SecretKey) -> SignedBeaconBlock {
-    let secp = Secp256k1::signing_only();
-
+pub fn seal_block(block: BeaconBlock, secret_key: &blst::min_pk::SecretKey) -> SignedBeaconBlock {
     // Compute seal hash (block root without signature)
     let seal_hash = compute_seal_hash(&block);
 
-    // Create message from hash
-    let msg = Message::from_digest(seal_hash.0);
+    // Sign with BLS
+    let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+    let sig = secret_key.sign(seal_hash.as_slice(), dst, &[]);
 
-    // Sign with recoverable signature
-    let sig = secp.sign_ecdsa_recoverable(&msg, secret_key);
+    // Serialize signature (96 bytes)
+    let sig_bytes = sig.to_bytes();
 
-    // Serialize to 65 bytes [r | s | v]
-    let sig_bytes = serialize_recoverable_signature(&sig);
-
-    SignedBeaconBlock::new(block, sig_bytes)
+    SignedBeaconBlock::new(block, Bytes::copy_from_slice(&sig_bytes))
 }
 
 /// Compute the seal hash for signing.
@@ -157,84 +162,49 @@ fn compute_seal_hash(block: &BeaconBlock) -> B256 {
     block.block_root()
 }
 
-/// Serialize a recoverable signature to 65 bytes.
-///
-/// Format: [r(32) | s(32) | recovery_id(1)]
-fn serialize_recoverable_signature(sig: &RecoverableSignature) -> Bytes {
-    let (recovery_id, sig_data) = sig.serialize_compact();
-
-    let mut sig_bytes = [0u8; 65];
-    sig_bytes[..64].copy_from_slice(&sig_data);
-    // RecoveryId can be converted to i32 via Into trait
-    sig_bytes[64] = i32::from(recovery_id) as u8;
-
-    Bytes::copy_from_slice(&sig_bytes)
-}
-
-/// Verify a block signature.
+/// Verify a block signature using BLS.
 ///
 /// # Arguments
 /// * `block` - The signed beacon block to verify
-/// * `expected_signer` - The expected signer's public key
+/// * `expected_signer` - The expected signer's BLS public key
 ///
 /// # Returns
 /// `true` if the signature is valid and matches the expected signer.
 pub fn verify_block_signature(
     block: &SignedBeaconBlock,
-    expected_signer: &secp256k1::PublicKey,
+    expected_signer: &BLSPubkey,
 ) -> bool {
-    let secp = Secp256k1::verification_only();
-
     // Get seal hash
     let seal_hash = compute_seal_hash(&block.message);
-    let msg = Message::from_digest(seal_hash.0);
 
-    // Parse signature
-    let sig_bytes = block.signature.as_ref();
-    if sig_bytes.len() != 65 {
+    // Parse BLS public key
+    let Ok(pk) = blst::min_pk::PublicKey::from_bytes(expected_signer) else {
         return false;
-    }
-
-    // Try to parse as recoverable signature
-    let recovery_id = match secp256k1::ecdsa::RecoveryId::try_from(sig_bytes[64] as i32) {
-        Ok(id) => id,
-        Err(_) => return false,
     };
 
-    let sig = match RecoverableSignature::from_compact(&sig_bytes[..64], recovery_id) {
-        Ok(s) => s,
-        Err(_) => return false,
+    // Parse BLS signature (96 bytes)
+    let sig_bytes = block.signature.as_ref();
+    let Ok(sig) = blst::min_pk::Signature::from_bytes(sig_bytes) else {
+        return false;
     };
 
-    // Recover public key from signature
-    let recovered_pubkey = match secp.recover_ecdsa(&msg, &sig) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
-    // Compare with expected signer
-    recovered_pubkey == *expected_signer
+    // Verify
+    let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+    sig.verify(true, seal_hash.as_slice(), dst, &[], &pk, true) == blst::BLST_ERROR::BLST_SUCCESS
 }
 
 /// Recover the signer's public key from a signed block.
 ///
+/// Note: BLS does not support key recovery from signature like secp256k1.
+/// This function returns None for BLS signatures.
+/// You must have the expected public key to verify.
+///
 /// # Returns
-/// The public key of the signer, or None if recovery fails.
-pub fn recover_signer(block: &SignedBeaconBlock) -> Option<secp256k1::PublicKey> {
-    let secp = Secp256k1::verification_only();
-
-    let seal_hash = compute_seal_hash(&block.message);
-    let msg = Message::from_digest(seal_hash.0);
-
-    let sig_bytes = block.signature.as_ref();
-    if sig_bytes.len() != 65 {
-        return None;
-    }
-
-    let recovery_id = secp256k1::ecdsa::RecoveryId::try_from(sig_bytes[64] as i32).ok()?;
-    let sig = RecoverableSignature::from_compact(&sig_bytes[..64], recovery_id).ok()?;
-
-    secp.recover_ecdsa(&msg, &sig).ok()
+/// None - BLS does not support key recovery.
+pub fn recover_signer(_block: &SignedBeaconBlock) -> Option<BLSPubkey> {
+    // BLS signatures do not support key recovery
+    // The verifier must have the public key beforehand
+    None
 }
 
 #[cfg(test)]
@@ -251,6 +221,14 @@ mod tests {
             BeaconBlockBody::default(),
             2, // in-turn difficulty
         )
+    }
+
+    fn create_test_keypair() -> (blst::min_pk::SecretKey, BLSPubkey) {
+        let ikm = [1u8; 32];
+        let sk = blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap();
+        let pk = sk.sk_to_pk();
+        let pubkey: BLSPubkey = pk.to_bytes();
+        (sk, pubkey)
     }
 
     #[test]
@@ -288,9 +266,7 @@ mod tests {
 
     #[test]
     fn test_seal_and_verify() {
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[1u8; 32]).unwrap();
-        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let (secret_key, public_key) = create_test_keypair();
 
         let block = create_test_block(1);
         let signed = seal_block(block, &secret_key);
@@ -300,24 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_signer() {
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[2u8; 32]).unwrap();
-        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-
-        let block = create_test_block(2);
-        let signed = seal_block(block, &secret_key);
-
-        let recovered = recover_signer(&signed).unwrap();
-        assert_eq!(recovered, public_key);
-    }
-
-    #[test]
     fn test_invalid_signature_fails() {
-        let secp = Secp256k1::new();
-        let secret_key1 = SecretKey::from_slice(&[1u8; 32]).unwrap();
-        let secret_key2 = SecretKey::from_slice(&[2u8; 32]).unwrap();
-        let public_key2 = secp256k1::PublicKey::from_secret_key(&secp, &secret_key2);
+        let (secret_key1, _) = create_test_keypair();
+
+        let mut ikm2 = [2u8; 32];
+        ikm2[0] = 2;
+        let sk2 = blst::min_pk::SecretKey::key_gen(&ikm2, &[]).unwrap();
+        let pk2 = sk2.sk_to_pk();
+        let public_key2: BLSPubkey = pk2.to_bytes();
 
         let block = create_test_block(3);
         // Sign with key1, verify against key2

@@ -79,8 +79,10 @@ tokio = { version = "1.44", features = ["full", "sync", "time"] }
 tokio-stream = "0.1"
 
 # Crypto
-secp256k1 = { version = "0.30", features = ["rand", "global-context", "recovery"] }
+# BLS signatures for consensus
 blst = "0.3"
+# secp256k1 for P2P network identity (required by devp2p protocol)
+secp256k1 = { version = "0.30", features = ["rand", "recovery", "global-context"] }
 
 # SSZ and Tree Hash (for POS)
 ssz = { package = "ethereum_ssz", version = "0.9" }
@@ -104,6 +106,11 @@ parking_lot = "0.12"
 
 # Caching
 lru = "0.12"
+
+[features]
+default = []
+# POA consensus with BLS signatures
+poa = []
 
 [profile.release]
 opt-level = 3
