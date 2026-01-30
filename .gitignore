@@ -5,3 +5,7 @@ Cargo.lock
 .DS_Store
 *.log
 /tmp
+
+# Internal notes (not for git)
+POS_COPY_NOTES.md
+.claude/

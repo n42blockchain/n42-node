@@ -65,9 +65,11 @@ use tokio_stream as _;
 pub mod consensus;
 pub mod engine;
 pub mod evm;
+pub mod merkle_db;
 pub mod miner;
 pub mod network;
 pub mod node;
+pub mod pos;
 pub mod primitives;
 pub mod stages;
 pub mod storage;
@@ -140,4 +142,50 @@ pub use miner::{
     PoaAttributesProvider, SealResult, Worker,
     calculate_seal_delay, recover_signer, seal_block, verify_block_signature,
     DEFAULT_GAS_CEIL, DEFAULT_GAS_PRICE, DEFAULT_RECOMMIT_INTERVAL, WIGGLE_TIME_MS,
+};
+
+// Re-export merkle_db types
+pub use merkle_db::{Value, VecTree, Error as VecTreeError};
+
+// Re-export POS types
+pub use pos::{
+    // Core types
+    BeaconState as PosBeaconState,
+    PosBeaconBlock,
+    PosBeaconBlockBody,
+    Attestation,
+    AttestationData,
+    Deposit,
+    DepositData,
+    DepositMessage,
+    VoluntaryExit,
+    VoluntaryExitWithSig,
+    Eth1Data as PosEth1Data,
+    ChainSpec,
+    beacon_chain_spec,
+    // Validator types
+    Validator as PosValidator,
+    ValidatorInfo,
+    ValidatorBeforeTx,
+    ValidatorChangeset,
+    ValidatorRevert,
+    // Committee types
+    CommitteeCache,
+    BeaconCommittee,
+    OwnedBeaconCommittee,
+    AttestationDuty,
+    ActivationQueue,
+    // Type aliases
+    Epoch,
+    Gwei,
+    Slot as PosSlot,
+    CommitteeIndex,
+    BLSPubkey,
+    BLSSignature,
+    Hash256 as PosHash256,
+    // Constants
+    SLOTS_PER_EPOCH,
+    DOMAIN_CONSTANT_BEACON_ATTESTER,
+    SignedRoot,
+    RelativeEpoch,
 };
