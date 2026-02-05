@@ -285,6 +285,129 @@ impl PosBeaconBlock {
     }
 }
 
+/// Result of mobile block verification.
+/// Contains the signed attestation data for a verified block.
+#[derive(Clone, Default, Deserialize, Serialize, Debug)]
+pub struct BlockVerifyResult {
+    /// BLS public key of the verifier (hex encoded)
+    pub pubkey: String,
+    /// BLS signature over the attestation data (hex encoded)
+    pub signature: String,
+    /// The attestation data that was signed
+    pub attestation_data: AttestationData,
+    /// Hash of the verified block
+    pub block_hash: B256,
+}
+
+/// Block to be verified by mobile validators.
+/// Contains all data needed to execute and verify a block.
+///
+/// Note: This struct uses custom serialization because `CachedReads` doesn't
+/// implement Serialize/Deserialize. When transmitting over JSON-RPC, the
+/// cached reads are serialized separately.
+#[derive(Clone, Debug)]
+pub struct UnverifiedBlock {
+    /// The sealed block to verify (serialized as JSON)
+    pub block_json: String,
+    /// Total difficulty at this block
+    pub td: alloy_primitives::U256,
+    /// Committee index for attestation
+    pub committee_index: CommitteeIndex,
+}
+
+impl Default for UnverifiedBlock {
+    fn default() -> Self {
+        Self {
+            block_json: String::new(),
+            td: alloy_primitives::U256::ZERO,
+            committee_index: 0,
+        }
+    }
+}
+
+impl Serialize for UnverifiedBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UnverifiedBlock", 3)?;
+        state.serialize_field("block_json", &self.block_json)?;
+        state.serialize_field("td", &self.td)?;
+        state.serialize_field("committee_index", &self.committee_index)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UnverifiedBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct UnverifiedBlockHelper {
+            block_json: String,
+            td: alloy_primitives::U256,
+            committee_index: CommitteeIndex,
+        }
+
+        let helper = UnverifiedBlockHelper::deserialize(deserializer)?;
+        Ok(UnverifiedBlock {
+            block_json: helper.block_json,
+            td: helper.td,
+            committee_index: helper.committee_index,
+        })
+    }
+}
+
+impl UnverifiedBlock {
+    /// Create a new unverified block from block JSON
+    pub fn from_block_json(
+        block_json: String,
+        td: alloy_primitives::U256,
+        committee_index: CommitteeIndex,
+    ) -> Self {
+        Self {
+            block_json,
+            td,
+            committee_index,
+        }
+    }
+
+    /// Get the block hash from the JSON (parses a minimal portion)
+    pub fn get_block_hash(&self) -> eyre::Result<B256> {
+        #[derive(Deserialize)]
+        struct BlockHashOnly {
+            hash: B256,
+        }
+        let block: BlockHashOnly = serde_json::from_str(&self.block_json)
+            .map_err(|e| eyre::eyre!("Failed to parse block hash: {}", e))?;
+        Ok(block.hash)
+    }
+
+    /// Get the block number from the JSON
+    pub fn get_block_number(&self) -> eyre::Result<u64> {
+        #[derive(Deserialize)]
+        struct BlockNumberOnly {
+            number: u64,
+        }
+        let block: BlockNumberOnly = serde_json::from_str(&self.block_json)
+            .map_err(|e| eyre::eyre!("Failed to parse block number: {}", e))?;
+        Ok(block.number)
+    }
+
+    /// Get the receipts root from the JSON
+    pub fn get_receipts_root(&self) -> eyre::Result<B256> {
+        #[derive(Deserialize)]
+        struct ReceiptsRootOnly {
+            receipts_root: B256,
+        }
+        let block: ReceiptsRootOnly = serde_json::from_str(&self.block_json)
+            .map_err(|e| eyre::eyre!("Failed to parse receipts root: {}", e))?;
+        Ok(block.receipts_root)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockVerifyResultAggregate {
     pub validator_indexes: BTreeSet<u64>,

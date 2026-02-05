@@ -54,11 +54,16 @@
 //! - [`network`]: Network primitives for P2P
 
 #![warn(unused_crate_dependencies)]
-// Dependencies used by binaries
+// Dependencies used by binaries or mobile SDK
+use anyhow as _;
 use eyre as _;
+use futures_util as _;
 use reth_discv4 as _;
 use reth_network_api as _;
 use reth_network_peers as _;
+use reth_revm as _;
+use revm_primitives as _;
+use secp256k1 as _;
 use tokio_stream as _;
 
 pub mod consensus;
@@ -66,6 +71,7 @@ pub mod engine;
 pub mod evm;
 pub mod merkle_db;
 pub mod miner;
+pub mod mobile_sdk;
 pub mod network;
 pub mod node;
 pub mod pos;
@@ -160,6 +166,25 @@ pub use miner::{
 // Re-export merkle_db types
 pub use merkle_db::{Value, VecTree, Error as VecTreeError};
 
+// Re-export mobile SDK types
+pub use mobile_sdk::{
+    run_client as mobile_run_client,
+    gen_block_verify_result,
+    verify as mobile_verify,
+    blst_utils::{generate_bls12_381_keypair, derive_pubkey_from_privkey},
+    deposit_exit::{
+        create_deposit_unsigned_tx, create_exit_unsigned_tx, create_get_exit_fee_unsigned_tx,
+        UnsignedTransactionRequest, DEVNET_DEPOSIT_CONTRACT_ADDRESS, TESTNET_DEPOSIT_CONTRACT_ADDRESS,
+        EIP7002_CONTRACT_ADDRESS,
+    },
+};
+
+// Re-export mobile SDK JNI and FFI bindings
+pub mod mobile_sdk_ffi {
+    pub use crate::mobile_sdk::jni::*;
+    pub use crate::mobile_sdk::c_ffi::*;
+}
+
 // Re-export POS types
 pub use pos::{
     // Core types
@@ -201,4 +226,7 @@ pub use pos::{
     DOMAIN_CONSTANT_BEACON_ATTESTER,
     SignedRoot,
     RelativeEpoch,
+    // Mobile verification types
+    BlockVerifyResult,
+    UnverifiedBlock,
 };

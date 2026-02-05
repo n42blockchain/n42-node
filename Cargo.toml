@@ -107,6 +107,18 @@ parking_lot = "0.12"
 # Caching
 lru = "0.12"
 
+# Mobile SDK
+jni = "0.21"
+once_cell = "1.21"
+jsonrpsee = { version = "0.25", features = ["server", "ws-client"] }
+futures-util = "0.3"
+anyhow = "1.0"
+rand = "0.8"
+
+# Reth revm for EVM execution
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+revm-primitives = "21.0"
+
 [features]
 default = []
 # POA consensus with BLS signatures

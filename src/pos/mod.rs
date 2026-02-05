@@ -53,6 +53,9 @@ pub use beacon::{
     SignedRoot,
     is_compounding_withdrawal_credential,
     RelativeEpoch,
+    // Mobile verification types
+    BlockVerifyResult,
+    UnverifiedBlock,
 };
 
 pub use validator::{
